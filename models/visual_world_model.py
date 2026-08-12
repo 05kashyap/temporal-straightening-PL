@@ -27,6 +27,7 @@ class VWorldModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         straighten=False,
+        twothirds=False,
         stop_grad=True,
         vcreg=False,
         vcreg_std_coeff=0,
@@ -73,6 +74,19 @@ class VWorldModel(nn.Module):
                 self.curvature_mode = "cos"
 
         self.straighten = self.curvature_mode is not None and self.straighten_scale > 0
+
+        self.twothirds_scale = 0.0
+        self.twothirds_mode = self.curvature_mode  # default: same pooling as straighten
+        if isinstance(twothirds, str):
+            if twothirds.startswith("aggtwothirds"):
+                suffix = twothirds.replace("aggtwothirds", "")
+                self.twothirds_scale = float(suffix) if suffix else 1.0
+                self.twothirds_mode = "aggcos"
+            elif twothirds.startswith("twothirds"):
+                suffix = twothirds.replace("twothirds", "")
+                self.twothirds_scale = float(suffix) if suffix else 1.0
+                self.twothirds_mode = "cos"
+        self.twothirds = self.twothirds_mode is not None and self.twothirds_scale > 0
 
         log.info("num_action_repeat: %s", self.num_action_repeat)
         log.info("num_proprio_repeat: %s", self.num_proprio_repeat)
@@ -294,6 +308,53 @@ class VWorldModel(nn.Module):
 
         return self._cos_curvature(v1, v2)
 
+    def _two_thirds_residual(self, v1, v2, eps=1e-6, step_thresh=1e-6):
+        """
+        v1, v2: consecutive velocity vectors, same shapes as in _cos_curvature
+                 (..., d) — leading dims can be (b, t', ) or (b, t', p).
+        Returns the per-position residual r_t = log(s_t) + (1/3) log(kappa_t),
+        with leading dims preserved (NOT flattened/masked), so callers can
+        take a grouped variance over the time axis.
+        """
+        s1 = v1.norm(dim=-1)
+        s2 = v2.norm(dim=-1)
+        # IMPORTANT: clamp, don't boolean-mask. _cos_curvature's mask-then-flatten
+        # pattern collapses (b, t', p) into a 1-D tensor, which destroys the
+        # per-sample/per-patch grouping this loss needs for its variance term.
+        s1 = s1.clamp_min(step_thresh)
+        s2 = s2.clamp_min(step_thresh)
+        avg_len = (s1 + s2) / 2
+
+        cos = F.cosine_similarity(v1, v2, dim=-1, eps=eps).clamp(-1 + eps, 1 - eps)
+        theta = torch.acos(cos)
+        kappa = theta / (avg_len + eps)
+
+        log_s = torch.log(avg_len + eps)
+        log_k = torch.log(kappa + eps)
+        return log_s + (1.0 / 3.0) * log_k          # shape: same leading dims as s1
+
+    def total_two_thirds_loss(self, features, mode="aggcos"):
+        if features.shape[1] < 3:
+            raise ValueError(
+                f"Features must have at least 3 frames for two-thirds loss, got {features.shape[1]}"
+            )
+        if mode == "aggcos":
+            if not hasattr(self.encoder, "agg"):
+                raise ValueError("two-thirds mode 'aggcos' requires encoder.agg().")
+            b, t, p, d = features.shape
+            tokens = features.reshape(b * t, p, d)
+            z = self.encoder.agg(tokens).reshape(b, t, -1)
+            v1 = z[:, 1:-1] - z[:, :-2]
+            v2 = z[:, 2:] - z[:, 1:-1]
+        elif mode == "cos":
+            v1 = features[:, 1:-1] - features[:, :-2]
+            v2 = features[:, 2:] - features[:, 1:-1]
+        else:
+            raise ValueError(f"Unknown two-thirds mode '{mode}'. Use 'cos' or 'aggcos'.")
+
+        r = self._two_thirds_residual(v1, v2)         # (b, t') or (b, t', p)
+        return r.var(dim=1, unbiased=False).mean()     # grouped var over time, then mean
+
     def forward(self, obs, act):
         """
         input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
@@ -363,11 +424,16 @@ class VWorldModel(nn.Module):
                 loss_components["z_vcreg_loss_scaled"] = z_reg_loss
                 loss = loss + z_reg_loss
 
+            feats = self.visual_only(z)
             if self.straighten and self.straighten_scale > 0:
-                feats = self.visual_only(z)
                 curvature_loss = self.total_curvature(feats, mode=self.curvature_mode)
                 loss = loss + curvature_loss * self.straighten_scale
                 loss_components["curvature_loss_used_for_training"] = curvature_loss
+
+            if self.twothirds and self.twothirds_scale > 0:
+                two_thirds_loss = self.total_two_thirds_loss(feats, mode=self.twothirds_mode)
+                loss = loss + two_thirds_loss * self.twothirds_scale
+                loss_components["two_thirds_loss_used_for_training"] = two_thirds_loss
         else:
             visual_pred = None
             z_pred = None

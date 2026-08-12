@@ -6,4 +6,4 @@ data
 wandb
 checkpoints
 *.slurm
-*.sh
+# *.sh

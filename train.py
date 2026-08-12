@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 import custom_resolvers  # noqa: F401  # Registers OmegaConf resolvers at import time.
+import models.dino  # noqa: F401  # Puts the pinned DINOv2 package on sys.path so saved checkpoints (which reference dinov2 classes) can be unpickled.
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -378,6 +379,7 @@ class Trainer:
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
             straighten=self.cfg.training.get("straighten", False),
+            twothirds=self.cfg.training.get("twothirds", False),
             stop_grad=self.cfg.training.get("stop_grad", True),
             vcreg=self.cfg.training.get("vcreg", False),
             vcreg_std_coeff=self.cfg.training.get("vcreg_std_coeff", 0),

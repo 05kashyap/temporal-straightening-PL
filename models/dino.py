@@ -1,3 +1,6 @@
+import os
+import sys
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +8,28 @@ import logging
 from pathlib import Path
 
 torch.hub._validate_not_a_forked_repo=lambda a,b,c: True
+
+# DINOv2 `main` switched to Python 3.10+ PEP 604 type-union annotations
+# (`float | None`) in PR #528 (2025-06-11), which fail to import under Python 3.9
+# (the version pinned in environment.yaml / the `ts` env). Pin torch.hub to the
+# last commit before that change; for `dinov2_vits14` the architecture and
+# pretrained LVD-142M weights are identical to current `main`.
+DINOV2_REF = "b48308a394a04ccb9c4dd3a1f0a4daa1ce0579b8"
+
+
+def _ensure_dinov2_importable():
+    """Put the pinned DINOv2 hub checkout on sys.path so `import dinov2` works
+    in this process. torch.hub removes its repo dir from sys.path after loading,
+    which otherwise breaks unpickling saved checkpoints that contain dinov2
+    module/class references."""
+    hub_dir = os.path.join(
+        torch.hub.get_dir(), f"facebookresearch_dinov2_{DINOV2_REF}"
+    )
+    if os.path.isdir(hub_dir) and hub_dir not in sys.path:
+        sys.path.insert(0, hub_dir)
+
+
+_ensure_dinov2_importable()
 
 logger = logging.getLogger(__name__)
 class GlobalProjector(nn.Module):
@@ -118,7 +143,7 @@ class DinoV2Encoder(nn.Module):
     ):
         super().__init__()
         self.name = name
-        self.base_model = torch.hub.load("facebookresearch/dinov2", name)
+        self.base_model = torch.hub.load(f"facebookresearch/dinov2:{DINOV2_REF}", name)
         self.feature_key = feature_key
         self.emb_dim = self.base_model.num_features
         self.projector_name = projector
