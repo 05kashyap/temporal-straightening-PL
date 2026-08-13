@@ -53,7 +53,7 @@ TWOTHIRDS="${TWOTHIRDS:-twothirds5e-2}"  # two-thirds: twothirds5e-2 (cos) or ag
 # Encoder must have a trainable projector (dino_global / dino_channel) for the regularizers to
 # have a training effect; encoder=dino (no projector) makes straighten/twothirds inert.
 # The RUN_* dir names below assume encoder=dino_global (projglobal / hw1).
-EPOCHS="${EPOCHS:-20}"
+EPOCHS="${EPOCHS:-7}"
 PLANNERS="${PLANNERS:-gd cem}"   # planners with configs in conf/plan_*.yaml
 GOAL_H="${GOAL_H:-25}"           # keep divisible by frameskip (5)
 N_EVALS="${N_EVALS:-50}"         # eval episodes (config default); fits: dino_global predictor attends over 3 tokens
@@ -129,11 +129,11 @@ if [ "$FRESH" = "1" ]; then
     rm -rf "$CKBPT/$RUN_FALSE" "$CKBPT/$RUN_TRUE" "$CKBPT/$RUN_TWOTHIRDS" "$CKBPT/$RUN_BOTH"
 fi
 
-# ---- step 1 & 2: baseline (no regularizers) ---------------------------------
-echo "===================== 1) TRAIN baseline (straighten=False) ============="
-train False False "$RUN_FALSE"
-echo "===================== 2) EVAL baseline model ==========================="
-plan_model "$RUN_FALSE"
+# # ---- step 1 & 2: baseline (no regularizers) ---------------------------------
+# echo "===================== 1) TRAIN baseline (straighten=False) ============="
+# train False False "$RUN_FALSE"
+# echo "===================== 2) EVAL baseline model ==========================="
+# plan_model "$RUN_FALSE"
 
 # ---- step 3 & 4: straightening ----------------------------------------------
 echo "===================== 3) TRAIN (straighten=$STRAIGHTEN) ==============="
@@ -141,17 +141,17 @@ train "$STRAIGHTEN" False "$RUN_TRUE"
 echo "===================== 4) EVAL straightening model ======================"
 plan_model "$RUN_TRUE"
 
-# ---- step 5 & 6: two-thirds regularizer only ---------------------------------
-echo "===================== 5) TRAIN (twothirds=$TWOTHIRDS) =================="
-train False "$TWOTHIRDS" "$RUN_TWOTHIRDS"
-echo "===================== 6) EVAL two-thirds model ========================="
-plan_model "$RUN_TWOTHIRDS"
+# # ---- step 5 & 6: two-thirds regularizer only ---------------------------------
+# echo "===================== 5) TRAIN (twothirds=$TWOTHIRDS) =================="
+# train False "$TWOTHIRDS" "$RUN_TWOTHIRDS"
+# echo "===================== 6) EVAL two-thirds model ========================="
+# plan_model "$RUN_TWOTHIRDS"
 
 # ---- step 7 & 8: straightening + two-thirds ----------------------------------
-echo "===================== 7) TRAIN (straighten=$STRAIGHTEN, twothirds=$TWOTHIRDS) ===="
-train "$STRAIGHTEN" "$TWOTHIRDS" "$RUN_BOTH"
-echo "===================== 8) EVAL both model ==============================="
-plan_model "$RUN_BOTH"
+# echo "===================== 7) TRAIN (straighten=$STRAIGHTEN, twothirds=$TWOTHIRDS) ===="
+# train "$STRAIGHTEN" "$TWOTHIRDS" "$RUN_BOTH"
+# echo "===================== 8) EVAL both model ==============================="
+# plan_model "$RUN_BOTH"
 
 # ---- aggregate results -------------------------------------------------------
 echo "===================== Collecting results =============================="
