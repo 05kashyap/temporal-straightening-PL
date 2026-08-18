@@ -27,6 +27,7 @@ model_epoch: latest
 
 seed: 100
 n_evals: 50
+chunk_size: null  # if set (e.g. 10), plan/eval episodes in chunks of this size to bound GPU/CPU memory; null = all n_evals at once
 goal_source: 'dset'
 goal_H: 25
 n_plot_samples: 10

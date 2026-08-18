@@ -134,6 +134,9 @@ class PlanWorkspace:
         self.eval_seed = [cfg_dict["seed"] * n + 1 for n in range(cfg_dict["n_evals"])]
         print("eval_seed: ", self.eval_seed)
         self.n_evals = cfg_dict["n_evals"]
+        self.chunk_size = max(
+            1, min(int(cfg_dict.get("chunk_size") or self.n_evals), self.n_evals)
+        )
         self.goal_source = cfg_dict["goal_source"]
         self.goal_H = cfg_dict["goal_H"]
         self.action_dim = self.dset.action_dim * self.frameskip
@@ -170,6 +173,7 @@ class PlanWorkspace:
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
             decode_for_viz=self.cfg_dict.get("decode_for_viz", True),
+            chunk_size=self.chunk_size,
         )
 
         if self.wandb_run is None or isinstance(
@@ -211,21 +215,30 @@ class PlanWorkspace:
         observations = []
         
         if self.goal_source == "random_state":
-            # update env config from val trajs
+            # update env config from val trajs (chunked to match env workers)
             observations, states, actions, env_info = (
                 self.sample_traj_segment_from_dset(traj_len=2)
             )
-            self.env.update_env(env_info)
+            for start in range(0, self.n_evals, self.chunk_size):
+                end = min(start + self.chunk_size, self.n_evals)
+                self.env.update_env(env_info[start:end])
 
-            # sample random states
-            rand_init_state, rand_goal_state = self.env.sample_random_init_goal_states(
-                self.eval_seed
-            )
+            # sample random states (chunked to match env workers)
+            rand_init_list, rand_goal_list = [], []
+            for start in range(0, self.n_evals, self.chunk_size):
+                end = min(start + self.chunk_size, self.n_evals)
+                ri, rg = self.env.sample_random_init_goal_states(
+                    self.eval_seed[start:end]
+                )
+                rand_init_list.append(ri)
+                rand_goal_list.append(rg)
+            rand_init_state = np.concatenate(rand_init_list, axis=0)
+            rand_goal_state = np.concatenate(rand_goal_list, axis=0)
             if self.env_name == "deformable_env": # take rand init state from dset for deformable envs
                 rand_init_state = np.array([x[0] for x in states])
 
-            obs_0, state_0 = self.env.prepare(self.eval_seed, rand_init_state)
-            obs_g, state_g = self.env.prepare(self.eval_seed, rand_goal_state)
+            obs_0, state_0 = self._chunked_env_prepare(self.eval_seed, rand_init_state)
+            obs_g, state_g = self._chunked_env_prepare(self.eval_seed, rand_goal_state)
 
             # add dim for t
             for k in obs_0.keys():
@@ -238,11 +251,13 @@ class PlanWorkspace:
             self.state_g = rand_goal_state
             self.gt_actions = None
         else:
-            # update env config from val trajs
+            # update env config from val trajs (chunked to match env workers)
             observations, states, actions, env_info = (
                 self.sample_traj_segment_from_dset(traj_len=self.goal_H + 1)
             )
-            self.env.update_env(env_info)
+            for start in range(0, self.n_evals, self.chunk_size):
+                end = min(start + self.chunk_size, self.n_evals)
+                self.env.update_env(env_info[start:end])
 
             # get states from val trajs
             init_state = [x[0] for x in states]
@@ -252,10 +267,22 @@ class PlanWorkspace:
                 actions = torch.randn_like(actions)
             wm_actions = rearrange(actions, "b (t f) d -> b t (f d)", f=self.frameskip)
             exec_actions = self.data_preprocessor.denormalize_actions(actions)
-            # replay actions in env to get gt obses
-            rollout_obses, rollout_states = self.env.rollout(
-                self.eval_seed, init_state, exec_actions.numpy()
-            )
+            # replay actions in env to get gt obses (chunked to match env workers)
+            rollout_obses_list, rollout_states_list = [], []
+            for start in range(0, self.n_evals, self.chunk_size):
+                end = min(start + self.chunk_size, self.n_evals)
+                o, s = self.env.rollout(
+                    self.eval_seed[start:end],
+                    init_state[start:end],
+                    exec_actions.numpy()[start:end],
+                )
+                rollout_obses_list.append(o)
+                rollout_states_list.append(s)
+            rollout_obses = {
+                key: np.concatenate([d[key] for d in rollout_obses_list], axis=0)
+                for key in rollout_obses_list[0]
+            }
+            rollout_states = np.concatenate(rollout_states_list, axis=0)
             self.obs_0 = {
                 key: np.expand_dims(arr[:, 0], axis=1)
                 for key, arr in rollout_obses.items()
@@ -267,6 +294,21 @@ class PlanWorkspace:
             self.state_0 = init_state  # (b, d)
             self.state_g = rollout_states[:, -1]  # (b, d)
             self.gt_actions = wm_actions
+
+    def _chunked_env_prepare(self, seeds, init_states):
+        """env.prepare over chunks so the batch always matches the env's worker count."""
+        obs_list, state_list = [], []
+        for start in range(0, self.n_evals, self.chunk_size):
+            end = min(start + self.chunk_size, self.n_evals)
+            o, s = self.env.prepare(seeds[start:end], init_states[start:end])
+            obs_list.append(o)
+            state_list.append(s)
+        obs = {
+            k: np.concatenate([d[k] for d in obs_list], axis=0)
+            for k in obs_list[0]
+        }
+        state = np.concatenate(state_list, axis=0)
+        return obs, state
 
     def sample_traj_segment_from_dset(self, traj_len):
         states = []
@@ -331,15 +373,37 @@ class PlanWorkspace:
         print(f"Dumped plan targets to {file_path}")
 
     def perform_planning(self):
-        if self.debug_dset_init:
-            actions_init = self.gt_actions
-        else:
-            actions_init = None
-        actions, action_len = self.planner.plan(
-            obs_0=self.obs_0,
-            obs_g=self.obs_g,
-            actions=actions_init,
-        )
+        # Plan in chunks of self.chunk_size so the GPU/CPU memory of each
+        # planner call (and its internal eval_actions calls) stays bounded.
+        all_actions, all_action_len = [], []
+        for start in range(0, self.n_evals, self.chunk_size):
+            end = min(start + self.chunk_size, self.n_evals)
+            chunk_obs_0 = {k: v[start:end] for k, v in self.obs_0.items()}
+            chunk_obs_g = {k: v[start:end] for k, v in self.obs_g.items()}
+            chunk_state_0 = self.state_0[start:end]
+            chunk_state_g = self.state_g[start:end]
+            # point the shared evaluator at the current chunk (planners call
+            # eval_actions internally, e.g. CEM eval_every / MPC per-iter).
+            self.evaluator.assign_init_cond(obs_0=chunk_obs_0, state_0=chunk_state_0)
+            self.evaluator.assign_goal_cond(obs_g=chunk_obs_g, state_g=chunk_state_g)
+            if self.debug_dset_init:
+                actions_init = self.gt_actions[start:end]
+            else:
+                actions_init = None
+            actions, action_len = self.planner.plan(
+                obs_0=chunk_obs_0,
+                obs_g=chunk_obs_g,
+                actions=actions_init,
+            )
+            all_actions.append(actions)
+            all_action_len.append(action_len)
+        actions = torch.cat(all_actions, dim=0)
+        action_len = np.concatenate(all_action_len)
+
+        # final eval over the full episode set (eval_actions chunks internally
+        # so the batch always matches the env's workers)
+        self.evaluator.assign_init_cond(obs_0=self.obs_0, state_0=self.state_0)
+        self.evaluator.assign_goal_cond(obs_g=self.obs_g, state_g=self.state_g)
         logs, successes, _, _ = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
@@ -481,6 +545,7 @@ def planning_main(cfg_dict):
     print(f"[timing] setup_model_s={t_after_model - t_start:.3f}", flush=True)
 
     # use dummy vector env for wall and deformable envs
+    n_envs = max(1, min(int(cfg_dict.get("chunk_size") or cfg_dict["n_evals"]), cfg_dict["n_evals"]))
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(
@@ -488,7 +553,7 @@ def planning_main(cfg_dict):
                 gym.make(
                     model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs
                 )
-                for _ in range(cfg_dict["n_evals"])
+                for _ in range(n_envs)
             ]
         )
     else:
@@ -497,7 +562,7 @@ def planning_main(cfg_dict):
                 lambda: gym.make(
                     model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs
                 )
-                for _ in range(cfg_dict["n_evals"])
+                for _ in range(n_envs)
             ]
         )
 

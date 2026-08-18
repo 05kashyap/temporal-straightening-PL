@@ -2,7 +2,7 @@ __pycache__
 *.pyc
 figures
 *outputs*
-data
+/data
 wandb
 checkpoints
 *.slurm

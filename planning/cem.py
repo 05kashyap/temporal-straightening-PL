@@ -22,6 +22,7 @@ class CEMPlanner(BasePlanner):
         wandb_run,
         logging_prefix="plan_0",
         log_filename="logs.json",
+        sample_chunk_size=None,
         **kwargs,
     ):
         super().__init__(
@@ -36,6 +37,9 @@ class CEMPlanner(BasePlanner):
         self.horizon = horizon
         self.topk = topk
         self.num_samples = num_samples
+        self.sample_chunk_size = (
+            int(sample_chunk_size) if sample_chunk_size and int(sample_chunk_size) > 0 else None
+        )
         self.var_scale = var_scale
         self.opt_steps = opt_steps
         self.eval_every = eval_every
@@ -105,13 +109,38 @@ class CEMPlanner(BasePlanner):
                     + mu[traj]
                 )
                 action[0] = mu[traj]  # optional: make the first one mu itself
-                with torch.no_grad():
-                    i_z_obses, i_zs = self.wm.rollout(
-                        obs_0=cur_trans_obs_0,
-                        act=action,
-                    )
-
-                loss = self.objective_fn(i_z_obses, cur_z_obs_g, step=step)
+                # Roll out the num_samples candidate action sequences, splitting them
+                # into sample_chunk_size batches to bound GPU memory. The losses are
+                # concatenated before the topk selection, so the result is identical
+                # to a single full-num_samples forward (only RNG draw order changes).
+                if self.sample_chunk_size is not None:
+                    loss_parts = []
+                    for start in range(0, self.num_samples, self.sample_chunk_size):
+                        end = min(start + self.sample_chunk_size, self.num_samples)
+                        chunk_obs_0 = {
+                            key: value[start:end]
+                            for key, value in cur_trans_obs_0.items()
+                        }
+                        chunk_obs_g = {
+                            key: value[start:end] for key, value in cur_z_obs_g.items()
+                        }
+                        chunk_action = action[start:end]
+                        with torch.no_grad():
+                            i_z_obses, _ = self.wm.rollout(
+                                obs_0=chunk_obs_0,
+                                act=chunk_action,
+                            )
+                        loss_parts.append(
+                            self.objective_fn(i_z_obses, chunk_obs_g, step=step)
+                        )
+                    loss = torch.cat(loss_parts, dim=0)
+                else:
+                    with torch.no_grad():
+                        i_z_obses, i_zs = self.wm.rollout(
+                            obs_0=cur_trans_obs_0,
+                            act=action,
+                        )
+                    loss = self.objective_fn(i_z_obses, cur_z_obs_g, step=step)
                 topk_idx = torch.argsort(loss)[: self.topk]
                 topk_action = action[topk_idx]
                 losses.append(loss[topk_idx[0]].item())

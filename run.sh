@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Temporal straightening + two-thirds pipeline (PointMaze umaze | PushT)
+# Temporal straightening + two-thirds pipeline (PointMaze umaze | PushT | Wall)
 #
 #   Step 1: train a baseline world model WITHOUT regularizers
 #   Step 2: evaluate it via planning (plan.py: GD + CEM)
@@ -11,12 +11,19 @@
 #   Step 7: train a world model WITH both straightening and two-thirds
 #   Step 8: evaluate it via planning (plan.py: GD + CEM)
 #
-# ENV=point_maze (default): PointMaze (umaze) task.
-# ENV=pusht: PushT task, same 4-variant experiment. Uses the original repo task
-#   config (env=pusht, dataset, frameskip, predictor=vit) but with
-#   encoder=dino_global -- a trainable projector is REQUIRED for the regularizers
-#   to have an effect (encoder=dino is all-frozen, making straighten/twothirds
-#   inert). PushT planning adds objective.alpha=1 per the README.
+# ENV=point_maze: PointMaze (umaze) task.
+# ENV=pusht (default): PushT task, same 4-variant experiment, but with the SPATIAL
+#   channel projector (encoder=dino_channel, 14x14x8) -- the paper reports ~2%
+#   open-loop GD success on PushT with the 1-token global projector (dino_global)
+#   vs ~70% with the channel projector. Regularizers act on the aggregation head
+#   there (aggcos1e-1 / aggtwothirds5e-2). The paper trains PushT for only 2 epochs
+#   (Appendix A.3); planning adds objective.alpha=1 per the README and uses
+#   reduced n_evals / num_samples because the 14x14 attention is heavier.
+# ENV=wall: Wall task, same channel-projector setup (paper App. A.1: 1920 trajs x
+#   50 steps, 20 epochs). Planning follows the paper's Section 5.3: start/goal
+#   states sampled from test trajectories (goal_source='dset') so goals are
+#   reachable within 25 steps, and only the target IMAGE is used in the objective
+#   (alpha=0) -- both are the plan_gd/plan_cem defaults, so no plan overrides.
 #
 # Results are saved under:
 #   checkpoints/test/<env>_<straighten>_tt<twothirds>_agg32_.../  training ckpts + config
@@ -25,7 +32,7 @@
 #
 # Usage:
 #   bash run.sh                  # run the full pipeline (resumes existing runs)
-#   ENV=pusht bash run.sh        # same experiment on PushT (original repo task config + alpha=1)
+#   ENV=wall bash run.sh         # same experiment on Wall (dino_channel + aggcos, dset goals + alpha=0 per paper 5.3)
 #   FRESH=1 bash run.sh          # delete the training run dirs for the selected ENV first
 #   BATCH_SIZE=8 bash run.sh      # smaller batch if memory is ever tight
 #   N_EVALS=10 bash run.sh       # fewer eval episodes for faster planning
@@ -47,28 +54,71 @@ export PATH="${PATH:+$PATH:}/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin" 
 
 # ---- knobs ------------------------------------------------------------------
 PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
-BATCH_SIZE="${BATCH_SIZE:-32}"   # config default; fits this GPU with decoder off + dino_global (3-token attention)
-STRAIGHTEN="${STRAIGHTEN:-cos1e-1}"  # README: cos1e-1 = patch-wise curvature regularization
-TWOTHIRDS="${TWOTHIRDS:-twothirds5e-2}"  # two-thirds: twothirds5e-2 (cos) or aggtwothirds5e-2 (aggcos)
+ENV="${ENV:-wall}"     # task: point_maze | pusht (default) | wall
+
+# Per-task defaults (BATCH_SIZE/STRAIGHTEN/TWOTHIRDS/EPOCHS/N_EVALS/NUM_SAMPLES
+# are set per task below; explicit env overrides always win).
+#  - point_maze uses encoder=dino_global (1 global token) + cos-mode regularizers;
+#    20 epochs is the paper protocol for the mazes.
+#  - pusht and wall use encoder=dino_channel (14x14x8 spatial features): the paper's
+#    Table 1 shows only ~2% open-loop GD success on PushT with the 1-token global
+#    projector vs ~70% with the channel projector (wall: 80% -> 90.67% with
+#    straightening). Regularizers act on the learned aggregation head (aggcos1e-1 /
+#    aggtwothirds5e-2). Pusht trains 2 epochs (paper A.3), wall 20 (paper A.1); the
+#    14x14 attention OOMs at batch 32 on the 12 GB GPU, and planning runs 50 evals
+#    in chunks of 10 to stay within memory. CEM uses the paper's num_samples=200,
+#    rolled out in chunks of 50 (CEM_SAMPLE_CHUNK_SIZE) to fit the same GPU.
+case "$ENV" in
+    pusht)
+        BATCH_SIZE="${BATCH_SIZE:-16}"  # paper default 32 OOMs the 12 GB GPU (dino_channel 14x14 attention); 16 fits, 8 is the safe fallback
+        STRAIGHTEN="${STRAIGHTEN:-aggcos1e-1}"
+        TWOTHIRDS="${TWOTHIRDS:-aggtwothirds5e-2}"
+        EPOCHS="${EPOCHS:-2}"      # paper protocol (A.3: "We train for 2 epochs")
+        N_EVALS="${N_EVALS:-50}"   # total eval episodes (processed in CHUNK_SIZE chunks)
+        NUM_SAMPLES="${NUM_SAMPLES:-200}"  # paper's CEM candidates per traj (was 50)
+        CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (identical result, fits the 12 GB GPU)
+        CHUNK_SIZE="${CHUNK_SIZE:-10}"  # plan/eval episodes in chunks of this size to bound memory
+        ;;
+    wall)
+        BATCH_SIZE="${BATCH_SIZE:-16}"  # paper default 32 OOMs the 12 GB GPU (dino_channel 14x14 attention); 16 fits, 8 is the safe fallback
+        STRAIGHTEN="${STRAIGHTEN:-aggcos1e-1}"
+        TWOTHIRDS="${TWOTHIRDS:-aggtwothirds5e-2}"
+        EPOCHS="${EPOCHS:-20}"     # paper protocol (A.1: "We train for 20 epochs")
+        N_EVALS="${N_EVALS:-50}"   # total eval episodes (processed in CHUNK_SIZE chunks)
+        NUM_SAMPLES="${NUM_SAMPLES:-200}"  # paper's CEM candidates per traj (was 50)
+        CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (identical result, fits the 12 GB GPU)
+        CHUNK_SIZE="${CHUNK_SIZE:-10}"  # plan/eval episodes in chunks of this size to bound memory
+        ;;
+    *)
+        # point_maze
+        BATCH_SIZE="${BATCH_SIZE:-32}"   # config default; fits this GPU with decoder off + dino_global (3-token attention)
+        STRAIGHTEN="${STRAIGHTEN:-cos1e-1}"  # README: cos1e-1 = patch-wise curvature regularization
+        TWOTHIRDS="${TWOTHIRDS:-twothirds5e-2}"  # two-thirds: twothirds5e-2 (cos) or aggtwothirds5e-2 (aggcos)
+        EPOCHS="${EPOCHS:-20}"
+        N_EVALS="${N_EVALS:-50}"         # eval episodes (config default)
+        NUM_SAMPLES="${NUM_SAMPLES:-200}" # CEM candidates per traj (config default)
+        CHUNK_SIZE="${CHUNK_SIZE:-}"     # empty = evaluate all n_evals at once (fits for dino_global)
+        ;;
+esac
 # Encoder must have a trainable projector (dino_global / dino_channel) for the regularizers to
 # have a training effect; encoder=dino (no projector) makes straighten/twothirds inert.
-# The RUN_* dir names below assume encoder=dino_global (projglobal / hw1).
-EPOCHS="${EPOCHS:-7}"
+# The RUN_* dir names below assume dino_global (projglobal/hw1) for point_maze and
+# dino_channel (projchannel/dim8/hw14) for pusht.
 PLANNERS="${PLANNERS:-gd cem}"   # planners with configs in conf/plan_*.yaml
 GOAL_H="${GOAL_H:-25}"           # keep divisible by frameskip (5)
-N_EVALS="${N_EVALS:-50}"         # eval episodes (config default); fits: dino_global predictor attends over 3 tokens
-NUM_SAMPLES="${NUM_SAMPLES:-200}" # CEM candidates per traj (config default); fits with dino_global
 TRAIN_DECODER="${TRAIN_DECODER:-False}"  # also train the VQVAE decoder (required for planner videos)
-FRESH="${FRESH:-0}"
-ENV="${ENV:-pusht}"     # task: point_maze (default) | pusht
+FRESH="${FRESH:-0}" # 1 = fresh
 
 CKBPT="./checkpoints"
 
 # ---- per-task setup ----------------------------------------------------------
 #  - point_maze: the original experiment (env=point_maze, encoder=dino_global).
-#  - pusht:      original repo task config (env=pusht, dataset, predictor=vit) +
-#                encoder=dino_global so the regularizers train the projector;
-#                planning adds objective.alpha=1 (README's PushT note).
+#  - pusht:      env=pusht with the SPATIAL channel projector (encoder=dino_channel,
+#                14x14x8) -- see the knobs comment for why. Regularizers use the
+#                aggcos modes; planning adds objective.alpha=1 (README's PushT note).
+#  - wall:       env=wall with the same channel-projector setup (the paper's main
+#                wall config); planning follows paper 5.3 -- dset goals + alpha=0
+#                (the plan defaults; see the comment in the wall case below).
 case "$ENV" in
     point_maze)
         TRAIN_TASK_OVERRIDES="env=point_maze encoder=dino_global"
@@ -79,15 +129,29 @@ case "$ENV" in
         RUN_BOTH="test/umaze_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
         ;;
     pusht)
-        TRAIN_TASK_OVERRIDES="env=pusht encoder=dino_global"
+        TRAIN_TASK_OVERRIDES="env=pusht encoder=dino_channel"
         PLAN_TASK_OVERRIDES="objective.alpha=1"
-        RUN_FALSE="test/pusht_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_TRUE="test/pusht_${STRAIGHTEN}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_TWOTHIRDS="test/pusht_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_BOTH="test/pusht_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
+        RUN_FALSE="test/pusht_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TRUE="test/pusht_${STRAIGHTEN}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TWOTHIRDS="test/pusht_${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_BOTH="test/pusht_${STRAIGHTEN}_${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        ;;
+    wall)
+        TRAIN_TASK_OVERRIDES="env=wall encoder=dino_channel"
+        # Paper 5.3: wall start/goal states are sampled from test trajectories so
+        # goals are reachable within 25 steps (goal_source='dset'), and only the
+        # target IMAGE is used in the objective ("for other environments, we only
+        # use target images" -> alpha=0). Both are the plan_gd/plan_cem defaults,
+        # so no plan overrides. (DINO-WM's random_state+alpha=1 wall config only
+        # worked with its closed-loop MPC, which run.sh does not use.)
+        PLAN_TASK_OVERRIDES=""
+        RUN_FALSE="test/wall_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TRUE="test/wall_${STRAIGHTEN}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TWOTHIRDS="test/wall_${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_BOTH="test/wall_${STRAIGHTEN}_${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         ;;
     *)
-        echo "Unknown ENV='$ENV' (choose point_maze or pusht)" >&2
+        echo "Unknown ENV='$ENV' (choose point_maze, pusht, or wall)" >&2
         exit 1
         ;;
 esac
@@ -111,29 +175,39 @@ plan_model() {  # $1 = model_name (relative to ckpt_base_path)
         # relative path would resolve against the wrong directory. The run dir
         # is also overridden to a clean name for readable output folders.
         local num_samples_arg=()
+        local cem_chunk_arg=()
         if [ "$planner" = "cem" ]; then
-            # 200 CEM samples OOM the 12 GB RTX 4070; keep it configurable.
+            # num_samples is the paper's 200; CEM_SAMPLE_CHUNK_SIZE rolls the
+            # candidates out in chunks so they fit the 12 GB RTX 4070 without
+            # changing the result (losses are concatenated before topk).
             num_samples_arg=(planner.sub_planner.num_samples="$NUM_SAMPLES")
+            if [ -n "${CEM_SAMPLE_CHUNK_SIZE:-}" ]; then
+                cem_chunk_arg=(planner.sub_planner.sample_chunk_size="$CEM_SAMPLE_CHUNK_SIZE")
+            fi
+        fi
+        local chunk_arg=()
+        if [ -n "$CHUNK_SIZE" ]; then
+            chunk_arg=(chunk_size="$CHUNK_SIZE")
         fi
         # shellcheck disable=SC2086  # PLAN_TASK_OVERRIDES is meant to be word-split
         "$PY" plan.py --config-name "plan_${planner}.yaml" \
             ckpt_base_path="$PWD/$CKBPT/$model_name" model_name="$model_name" \
             hydra.run.dir="plan_outputs_${planner}/$(echo "$model_name" | tr '/' '_')_gH${GOAL_H}" \
-            goal_H="$GOAL_H" n_evals="$N_EVALS" $PLAN_TASK_OVERRIDES "${num_samples_arg[@]}"
+            goal_H="$GOAL_H" n_evals="$N_EVALS" $PLAN_TASK_OVERRIDES "${num_samples_arg[@]}" "${cem_chunk_arg[@]}" "${chunk_arg[@]}"
     done
 }
 
 # ---- optional clean start ---------------------------------------------------
-if [ "$FRESH" = "1" ]; then
+if [ "$FRESH" = "0" ]; then
     echo ">> FRESH=1: deleting existing run dirs for env=$ENV"
     rm -rf "$CKBPT/$RUN_FALSE" "$CKBPT/$RUN_TRUE" "$CKBPT/$RUN_TWOTHIRDS" "$CKBPT/$RUN_BOTH"
 fi
 
-# # ---- step 1 & 2: baseline (no regularizers) ---------------------------------
-# echo "===================== 1) TRAIN baseline (straighten=False) ============="
-# train False False "$RUN_FALSE"
-# echo "===================== 2) EVAL baseline model ==========================="
-# plan_model "$RUN_FALSE"
+# ---- step 1 & 2: baseline (no regularizers) ---------------------------------
+echo "===================== 1) TRAIN baseline (straighten=False) ============="
+train False False "$RUN_FALSE"
+echo "===================== 2) EVAL baseline model ==========================="
+plan_model "$RUN_FALSE"
 
 # ---- step 3 & 4: straightening ----------------------------------------------
 echo "===================== 3) TRAIN (straighten=$STRAIGHTEN) ==============="
@@ -147,7 +221,7 @@ plan_model "$RUN_TRUE"
 # echo "===================== 6) EVAL two-thirds model ========================="
 # plan_model "$RUN_TWOTHIRDS"
 
-# ---- step 7 & 8: straightening + two-thirds ----------------------------------
+# # ---- step 7 & 8: straightening + two-thirds ----------------------------------
 # echo "===================== 7) TRAIN (straighten=$STRAIGHTEN, twothirds=$TWOTHIRDS) ===="
 # train "$STRAIGHTEN" "$TWOTHIRDS" "$RUN_BOTH"
 # echo "===================== 8) EVAL both model ==============================="

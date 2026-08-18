@@ -75,6 +75,10 @@ class MPCPlanner(BasePlanner):
         Returns:
             actions: (B, T, action_dim) torch.Tensor
         """
+        # plan() may be called repeatedly (e.g. once per chunk of episodes when
+        # chunk_size < n_evals), so reset the per-call state here.
+        self.iter = 0
+        self.planned_actions = []
         n_evals = obs_0["visual"].shape[0]
         self.is_success = np.zeros(n_evals, dtype=bool)
         self.action_len = np.full(n_evals, np.inf)
