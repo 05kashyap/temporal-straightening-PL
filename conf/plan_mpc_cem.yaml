@@ -4,9 +4,9 @@ defaults:
 
 hydra:
   run:
-    dir: plan_outputs_gd_mpc/${replace_slash:${model_name}}_gH${goal_H}_${goal_source}/${ckpt_base_path}_gd_lr${planner.sub_planner.lr}_an${planner.sub_planner.action_noise}_opt${planner.sub_planner.opt_steps}_obj${objective.mode}_init${planner.sub_planner.sample_type}
+    dir: plan_outputs_mpc_cem/${replace_slash:${model_name}}_gH${goal_H}_${goal_source}/${ckpt_base_path}_cem_ns${planner.sub_planner.num_samples}_opt${planner.sub_planner.opt_steps}_obj${objective.mode}
   sweep:
-    dir: plan_outputs_gd_mpc/${replace_slash:${model_name}}_gH${goal_H}_${goal_source}/${ckpt_base_path}_gd_lr${planner.sub_planner.lr}_an${planner.sub_planner.action_noise}_opt${planner.sub_planner.opt_steps}_obj${objective.mode}_init${planner.sub_planner.sample_type}
+    dir: plan_outputs_mpc_cem/${replace_slash:${model_name}}_gH${goal_H}_${goal_source}/${ckpt_base_path}_cem_ns${planner.sub_planner.num_samples}_opt${planner.sub_planner.opt_steps}_obj${objective.mode}
     subdir: ${hydra.job.num}
   launcher:
     submitit_folder: ${hydra.sweep.dir}/.submitit/%j
@@ -39,24 +39,20 @@ debug_dset_init: False
 objective:
   _target_: planning.objectives.create_objective_fn
   alpha: 0
-  base: 2 
-  mode: all
+  base: 2
+  mode: last
 
 planner:
   _target_: planning.mpc.MPCPlanner
-  # 4 MPC iters x n_taken_actions=5 covers the goal_H=19 horizon (4*5 >= 19);
-  # with a larger cap the loop replans only past-horizon windows while each
-  # eval re-executes the full accumulated action history in the real sim
-  # (~8s/action -> ~2.2h/chunk at max_iter=20, ~8min at 4).
-  max_iter: 4
+  max_iter: 20
   n_taken_actions: 5
   sub_planner:
-    target: planning.gd.GDPlanner
-    lr: 0.1
-    sample_type: zero
-    action_noise: 0
-    horizon: 25
+    target: planning.cem.CEMPlanner
+    horizon: 5
+    topk: 30
+    num_samples: 300
+    sample_chunk_size: null  # if set (e.g. 50), roll out num_samples candidates in chunks of this size to bound GPU memory; result identical to one full rollout
     var_scale: 1
-    opt_steps: 100
-    eval_every: -1
-  name: mpc_gd
+    opt_steps: 30
+    eval_every: 1
+  name: mpc_cem
