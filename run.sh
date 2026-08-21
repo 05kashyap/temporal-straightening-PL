@@ -131,8 +131,9 @@ case "$ENV" in
     point_maze_medium)
         # PointMaze-Medium (D4RL maze2d medium), paper-accurate settings:
         # dino_global, straighten cos1e-2 (Table 1 dagger: lambda=0.01 for
-        # Medium-global; UMaze/Wall global used 0.1/0.001), encoder_lr 1e-6
-        # (Table 3 "Global Projector/ResNet lr"), 20 epochs.
+        # Medium-global; UMaze/Wall global used 0.1/0.001). encoder_lr: the
+        # baseline (no straightening) uses 1e-6, all other variants use 1e-5
+        # (Table 3 footnote a), 20 epochs.
         BATCH_SIZE="${BATCH_SIZE:-32}"   # config default 32; fits this GPU with decoder off + dino_global (3-token attention)
         STRAIGHTEN="${STRAIGHTEN:-cos1e-1}"  
         TWOTHIRDS="${TWOTHIRDS:-twothirds5e-2}"  # two-thirds: twothirds5e-2 (cos) or aggtwothirds5e-2 (aggcos)
@@ -181,9 +182,9 @@ case "$ENV" in
         RUN_BOTH="test/umaze_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
         ;;
     point_maze_medium)
-        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_global training.encoder_lr=1e-5"  # Table 3: global projector lr
+        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_global"  # encoder_lr: 1e-6 for baseline, 1e-5 for the rest (Table 3 fn a)
         PLAN_TASK_OVERRIDES=""
-        RUN_FALSE="test/medium_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
+        RUN_FALSE="test/medium_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-06"
         RUN_TRUE="test/medium_${STRAIGHTEN}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
         RUN_TWOTHIRDS="test/medium_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
         RUN_BOTH="test/medium_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
@@ -232,13 +233,18 @@ case "$ENV" in
 esac
 
 # ---- helpers ----------------------------------------------------------------
-train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name
+train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name, $4 = encoder_lr (optional)
     echo "==== TRAIN env=$ENV straighten=$1 twothirds=$2 decoder=$TRAIN_DECODER ===="
     # shellcheck disable=SC2086  # TRAIN_TASK_OVERRIDES is meant to be word-split
+    local lr_arg=()
+    if [ -n "$4" ]; then
+        lr_arg=(training.encoder_lr="$4")
+    fi
     "$PY" train.py --config-name train.yaml $TRAIN_TASK_OVERRIDES \
         training.straighten="$1" training.twothirds="$2" \
         training.batch_size="$BATCH_SIZE" training.epochs="$EPOCHS" \
         model.train_decoder="$TRAIN_DECODER" has_decoder="$TRAIN_DECODER" \
+        "${lr_arg[@]}" \
         hydra.run.dir="$CKBPT/$3"
 }
 
@@ -302,7 +308,7 @@ fi
 
 # # ---- step 1 & 2: baseline (no regularizers) ---------------------------------
 # echo "===================== 1) TRAIN baseline (straighten=False) ============="
-# train False False "$RUN_FALSE"
+# train False False "$RUN_FALSE" 1e-6  # paper Table 3 footnote: baseline (no straightening) uses lr 1e-6; the rest use 1e-5
 # echo "===================== 2) EVAL baseline model ==========================="
 # plan_model "$RUN_FALSE"
 

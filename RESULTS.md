@@ -1,8 +1,8 @@
-# Results: Temporal Straightening + Two-Thirds Regularization (PointMaze umaze | PushT | Wall)
+# Results: Temporal Straightening + Two-Thirds Regularization (PointMaze umaze | PointMaze medium | PushT | Wall)
 
-Compiled from the runs on this machine (single NVIDIA RTX 4070 12 GB). Three experiments are
-documented: **PointMaze-umaze** (`encoder=dino_global`), **PushT** (`encoder=dino_channel`), and
-**Wall** (`encoder=dino_channel`).
+Compiled from the runs on this machine (single NVIDIA RTX 4070 12 GB). Four experiments are
+documented: **PointMaze-umaze** and **PointMaze-medium** (`encoder=dino_global`), **PushT**
+(`encoder=dino_channel`), and **Wall** (`encoder=dino_channel`).
 All three train decoder-less world models (`TRAIN_DECODER=False`) and evaluate open-loop planning at
 `goal_H=25`. All runs use the offline-wandb logs and `logs.json` under `plan_outputs_*`.
 
@@ -51,6 +51,42 @@ goal-reaching planning, compared to straightening alone?
 `n_evals=50` gives a binomial standard error of ~0.07. The GD gain (+16 pp, ~2.3 SE) is the
 strongest evidence; the CEM gain (+10 pp, ~1.4 SE) is suggestive but within noise. Re-running with
 more evals (e.g. 200) would tighten this.
+
+---
+
+---
+
+## PointMaze (medium) results
+
+Same protocol as umaze (`dino_global`, decoder-less, 20 epochs, open-loop GD/CEM at `goal_H=25`)
+but on the D4RL maze2d-**medium** layout (4000 x 100-step episodes). Straightening uses `cos1e-2`
+(λ=0.01) -- the paper's Medium-global value (Table 1 dagger). Encoder lr follows the paper's
+Table 3 footnote: the **baseline** (no straightening) is trained at **1e-6**; all other variants at **1e-5**.
+
+| Model (dino_global) | GD success | CEM success | GD state-dist | CEM state-dist |
+|---|---|---|---|---|
+| baseline (no regularizers) | 0.16 | 0.46 | 4.31 | 3.19 |
+| straightening only (`cos1e-2`) | 0.12 | 0.46 | 3.69 | 3.36 |
+| two-thirds only (`twothirds5e-2`) | 0.22 | 0.24 | 3.85 | 3.70 |
+| both | 0.08 | 0.38 | 4.03 | 3.26 |
+
+### Caveats (read before interpreting)
+
+- The **`both` model was trained with `cos1e-1` (λ=0.1), not `cos1e-2`** (it predates the Medium
+  λ=0.01 finding), so the both-vs-straighten comparison mixes λ values.
+- The straighten-only model was trained at lr **1e-6** (the paper uses 1e-5 for straightened
+  models), so it underrepresents the paper's straighten configuration.
+- Single eval seed (`n_evals=50`); the paper reports mean ± std over three eval seeds.
+
+### Interpretation
+
+- **Straightening did not help open-loop here**: GD 0.12 vs baseline 0.16; CEM 0.46 vs 0.46.
+  The paper's Medium-global open-loop gain is small anyway (baseline 18.0 -> straighten 22.7 GD);
+  its larger Medium effect is in MPC (46 -> 78).
+- **Two-thirds helps GD** (0.22, best of the four) **but hurts CEM** (0.24, worst) -- the
+  opposite pattern of umaze.
+- Given the λ/lr caveats above, treat these as a preliminary medium run, not a faithful
+  reproduction of the paper's Medium settings.
 
 ---
 
