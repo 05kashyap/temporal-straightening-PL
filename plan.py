@@ -397,7 +397,18 @@ class PlanWorkspace:
             )
             all_actions.append(actions)
             all_action_len.append(action_len)
-        actions = torch.cat(all_actions, dim=0)
+        # Closed-loop MPC returns per-chunk horizons that can differ (each
+        # episode succeeds at its own MPC iteration), so pad every chunk to the
+        # max horizon before concatenating. eval_actions truncates each episode
+        # by its own action_len, so the padded tail is never scored.
+        max_T = max(a.shape[1] for a in all_actions)
+        actions = torch.cat(
+            [
+                torch.nn.functional.pad(a, (0, 0, 0, max_T - a.shape[1]))
+                for a in all_actions
+            ],
+            dim=0,
+        )
         action_len = np.concatenate(all_action_len)
 
         # final eval over the full episode set (eval_actions chunks internally

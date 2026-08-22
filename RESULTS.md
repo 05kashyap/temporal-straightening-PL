@@ -65,10 +65,10 @@ Table 3 footnote: the **baseline** (no straightening) is trained at **1e-6**; al
 
 | Model (dino_global) | GD success | CEM success | GD state-dist | CEM state-dist |
 |---|---|---|---|---|
-| baseline (no regularizers) | 0.16 | 0.46 | 4.31 | 3.19 |
+| baseline (no regularizers) | 0.08 | 0.38 | 4.31 | 3.26 |
 | straightening only (`cos1e-2`) | 0.12 | 0.46 | 3.69 | 3.36 |
 | two-thirds only (`twothirds5e-2`) | 0.22 | 0.24 | 3.85 | 3.70 |
-| both | 0.08 | 0.38 | 4.03 | 3.26 |
+| both | 0.16 | 0.46 | 4.03 | 3.19 |
 
 ### Caveats (read before interpreting)
 
