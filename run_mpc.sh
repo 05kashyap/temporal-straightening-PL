@@ -6,8 +6,9 @@
 #
 # Faithful MPC = the paper's closed-loop MPC (temporal-straightening, Table 4/5):
 #   n_taken_actions=5, GD opt_steps=100 (Adam, lr 0.1, zero init); CEM
-#   num_samples=200, opt_steps=10. max_iter is capped at 20 -- the MPC loop
-#   exits early on success, so the cap is only a safety bound.
+#   num_samples=300, opt_steps=30 (plan_mpc_cem.yaml defaults; the paper's CEM
+#   is open-loop only). max_iter is capped at 20 -- the MPC loop exits early
+#   on success, so the cap is only a safety bound.
 #
 # Usage:
 #   bash run_mpc.sh <env> [variant] [planner]
@@ -53,7 +54,8 @@ case "$ENV_SEL" in
     umaze)
         ENV_NAME=point_maze
         GOAL_H=25
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
+        # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
         MODELS=(
             "umaze_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
             "umaze_cos1e-1_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
@@ -64,7 +66,8 @@ case "$ENV_SEL" in
     medium)
         ENV_NAME=point_maze_medium
         GOAL_H=25
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
+        # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
         MODELS=(
             "medium_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-06"
             "medium_cos1e-2_agg32_projglobal_dim384_hw1_sgTrue_lr1e-06"
@@ -86,7 +89,8 @@ case "$ENV_SEL" in
     wall)
         ENV_NAME=wall
         GOAL_H=25
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
+        # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
         MODELS=(
             "wall_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
             "wall_aggcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
@@ -125,9 +129,9 @@ esac
 FULL_N_EVALS=50
 FULL_MAX_ITER=20        # safety cap; the loop exits on success (~5 iters for a 25-step goal)
 GD_OPT=100              # paper Table 4
-CEM_SAMPLES=200         # paper Table 5
-CEM_OPT=10              # paper Table 5
-CEM_CHUNK=50            # roll the 200 CEM samples in chunks of 50 (12 GB GPU)
+CEM_SAMPLES=300         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
+CEM_OPT=30              # plan_mpc_cem.yaml default
+CEM_CHUNK=50            # roll the 300 CEM samples in chunks of 50 (12 GB GPU)
 
 S_N_EVALS=1
 S_MAX_ITER=1
@@ -165,7 +169,7 @@ print_full_cmd() {  # $1 planner, $2 model
     local planner="$1" model="$2" cfg="plan_${planner}.yaml"
     local extra
     if [ "$planner" = "mpc_cem" ]; then
-        extra="planner.sub_planner.num_samples=$CEM_SAMPLES planner.sub_planner.opt_steps=$CEM_OPT planner.sub_planner.sample_chunk_size=$CEM_CHUNK"
+        extra="planner.sub_planner.sample_chunk_size=$CEM_CHUNK"
     else
         extra="planner.sub_planner.opt_steps=$GD_OPT"
     fi
@@ -230,9 +234,9 @@ for i in "${IDX[@]}"; do
                 run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
                     planner.sub_planner.opt_steps="$GD_OPT"
             else
+                # num_samples/opt_steps come from the plan_mpc_cem.yaml defaults
+                # (300 / 30); only the GPU-memory chunk size is overridden here.
                 run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
-                    planner.sub_planner.num_samples="$CEM_SAMPLES" \
-                    planner.sub_planner.opt_steps="$CEM_OPT" \
                     planner.sub_planner.sample_chunk_size="$CEM_CHUNK"
             fi
             rc=$?

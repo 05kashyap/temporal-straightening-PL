@@ -48,7 +48,10 @@ planner:
   n_taken_actions: 5
   sub_planner:
     target: planning.cem.CEMPlanner
-    horizon: 5
+    # 25 env-frame horizon; plan.py divides by frameskip=5 -> 5 model steps,
+    # matching plan_gd_mpc.yaml and the paper's Table 4 "Subplanner horizon 25".
+    # (A value of 5 here would collapse to a greedy 1-model-step lookahead.)
+    horizon: 25
     topk: 30
     num_samples: 300
     sample_chunk_size: null  # if set (e.g. 50), roll out num_samples candidates in chunks of this size to bound GPU memory; result identical to one full rollout
