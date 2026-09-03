@@ -17,6 +17,10 @@
 #
 # Note on the pip pins: torch 2.3.0 + torchvision 0.18.0 are the versions the
 # repo was developed against (the PyPI Linux wheels are the cu121 CUDA builds).
+# wandb is NOT pinned to the repo's 0.13.1 on purpose: 0.13.1 depends on the
+# ancient sdist-only 'pathtools' package, which fails to build on Kaggle's
+# Python. wandb 0.19.1 (same init/log/watch API the repo uses) no longer pulls
+# pathtools.
 # hydra-submitit-launcher is required because conf/train.yaml composes
 # `override hydra/launcher: submitit_slurm` even for a single-process run.
 # =============================================================================
@@ -33,7 +37,7 @@ pip install -q --no-input \
     "hydra-core==1.2.0" \
     "hydra-submitit-launcher==1.2.0" \
     "accelerate==0.26.1" \
-    "wandb==0.13.1" \
+    "wandb==0.19.1" \
     "decord==0.6.0" \
     "tqdm" \
     "psutil" \
