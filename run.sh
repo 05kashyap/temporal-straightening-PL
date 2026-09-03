@@ -62,10 +62,10 @@ export WANDB_MODE="${WANDB_MODE:-offline}"   # no wandb api key on this machine
 MUJOCO_PY_MUJOCO_PATH="${MUJOCO_PY_MUJOCO_PATH:-$HOME/.mujoco/mujoco-2.1.2}"
 export MUJOCO_PY_MUJOCO_PATH
 export LD_LIBRARY_PATH="${MUJOCO_PY_MUJOCO_PATH}/bin:/usr/lib/nvidia:${LD_LIBRARY_PATH:-}"
-export PATH="${PATH:+$PATH:}/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin"  # patchelf (mujoco_py one-time cymj build)
+export PATH="${PATH:+$PATH:}$HOME/miniconda3/envs/ts/bin"  # patchelf/gcc (mujoco_py one-time cymj build)
 
 # ---- knobs ------------------------------------------------------------------
-PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
+PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 ENV="${ENV:-point_maze_medium}"     # task: point_maze | pusht | wall (default) | granular | rope
 
 # Per-task defaults (BATCH_SIZE/STRAIGHTEN/TWOTHIRDS/EPOCHS/N_EVALS/NUM_SAMPLES

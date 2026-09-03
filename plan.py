@@ -537,7 +537,32 @@ def planning_main(cfg_dict):
     model_path = os.path.abspath(model_path)
     with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
         model_cfg = OmegaConf.load(f)
-    
+
+    # Checkpoints store the ABSOLUTE dataset path of the machine they were
+    # trained on (e.g. /home/<user>/.../data/datasets/point_maze_medium). If that
+    # path is missing, redirect to $DATASET_DIR/<dataset-name> (the repo default
+    # data/datasets is used when DATASET_DIR is unset).
+    try:
+        _stored_dpath = model_cfg.env.dataset.get("data_path")
+    except Exception:
+        _stored_dpath = None
+    if _stored_dpath:
+        _stored_dpath = os.path.normpath(_stored_dpath)
+        if not os.path.isdir(_stored_dpath):
+            _dname = os.path.basename(_stored_dpath)
+            _dset_root = os.environ.get(
+                "DATASET_DIR", os.path.join(os.getcwd(), "data", "datasets")
+            )
+            _redirect = os.path.join(_dset_root, _dname)
+            if os.path.isdir(_redirect):
+                OmegaConf.set_struct(model_cfg, False)
+                model_cfg.env.dataset.data_path = _redirect
+                OmegaConf.set_struct(model_cfg, True)
+                print(
+                    f"[plan.py] dataset data_path {_stored_dpath} not found; "
+                    f"redirecting to {_redirect}"
+                )
+
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
         model_cfg.env.dataset,

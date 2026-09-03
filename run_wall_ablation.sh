@@ -33,7 +33,7 @@ source setup.sh                          # exports DATASET_DIR
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export MUJOCO_PY_MUJOCO_PATH="${MUJOCO_PY_MUJOCO_PATH:-$HOME/.mujoco/mujoco-2.1.2}"
 export LD_LIBRARY_PATH="${MUJOCO_PY_MUJOCO_PATH}/bin:/usr/lib/nvidia:${LD_LIBRARY_PATH:-}"
-PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
+PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 
 CKBPT="./checkpoints"
 EPOCHS="${EPOCHS:-8}"

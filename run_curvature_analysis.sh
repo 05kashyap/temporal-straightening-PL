@@ -20,7 +20,7 @@ cd "$(dirname "$0")"
 
 source setup.sh                          # exports DATASET_DIR
 export WANDB_MODE="${WANDB_MODE:-offline}"
-PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
+PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 
 # Single episode by default (fast, per-episode geometry is the point of the
 # plots); pass through any extra args the user wants (--max-episodes, --grid, ...).

@@ -32,7 +32,7 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_MODE
-PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
+PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 CKBPT="${CKBPT:-checkpoints/test}"   # run.sh stores trained models under checkpoints/test/
 
 ENV_SEL="${1:-}"
@@ -96,11 +96,16 @@ case "$ENV_SEL" in
             "wall_aggcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         )
         # The wall models were trained with data_path hardcoded to
-        # data/datasets/wall_single; the data now lives on the disk mount.
-        # Mirror the existing point_maze/pusht_noise symlink convention.
+        # data/datasets/wall_single. On this laptop the datasets live under
+        # DATASET_DIR (setup.sh); only auto-symlink when the external copy that
+        # exists on the original dev machine is present.
         if [ ! -e "$PWD/data/datasets/wall_single" ]; then
-            ln -s /run/media/shanveen-ortho-clinic/datadrv/WorldModelDatasets/wall_single                 "$PWD/data/datasets/wall_single"
-            echo "  [wall] created symlink: data/datasets/wall_single -> disk mount"
+            if [ -d /run/media/shanveen-ortho-clinic/datadrv/WorldModelDatasets/wall_single ]; then
+                ln -s /run/media/shanveen-ortho-clinic/datadrv/WorldModelDatasets/wall_single "$PWD/data/datasets/wall_single"
+                echo "  [wall] created symlink: data/datasets/wall_single -> disk mount"
+            else
+                echo "  [wall] data/datasets/wall_single not found; place wall_single under DATASET_DIR"
+            fi
         fi
         ;;
     *)
