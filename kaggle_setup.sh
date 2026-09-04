@@ -13,7 +13,8 @@
 #   - Kaggle notebook with GPU accelerator (T4 x2 / P100). Internet access ON
 #     (Settings -> Internet), needed for torch.hub to download DINOv2 weights
 #     and code on the first training run (~84 MB, cached under ~/.cache/torch).
-#   - Python 3.10/3.11 (current Kaggle images) is fine for every pin below.
+#   - Python 3.10-3.12 (current Kaggle images use 3.12) is fine for the pins
+#     below; see the hydra-core note for the 3.12-specific pin choice.
 #
 # Note on the pip pins: torch 2.3.0 + torchvision 0.18.0 are the versions the
 # repo was developed against (the PyPI Linux wheels are the cu121 CUDA builds).
@@ -21,6 +22,10 @@
 # ancient sdist-only 'pathtools' package, which fails to build on Kaggle's
 # Python. wandb 0.19.1 (same init/log/watch API the repo uses) no longer pulls
 # pathtools.
+# hydra-core is 1.3.2 (not the repo's 1.2.0): Kaggle notebooks run Python 3.12,
+# and hydra-core 1.2.0 crashes under Python >=3.11 with
+#   ValueError: mutable default ... OverrideDirname ... use default_factory
+# (1.3.2 is the release that fixed that).
 # hydra-submitit-launcher is required because conf/train.yaml composes
 # `override hydra/launcher: submitit_slurm` even for a single-process run.
 # =============================================================================
@@ -34,7 +39,7 @@ pip install -q --no-input \
     "numpy<2" \
     "einops==0.4.1" \
     "omegaconf==2.3.0" \
-    "hydra-core==1.2.0" \
+    "hydra-core==1.3.2" \
     "hydra-submitit-launcher==1.2.0" \
     "accelerate==0.26.1" \
     "wandb==0.19.1" \
