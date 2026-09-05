@@ -47,7 +47,7 @@ EPOCHS_ARG="${3:-}"
 BATCH_ARG="${4:-}"
 NUM_HIST="${NUM_HIST:-3}"   # predictor context frames (conf/train.yaml default is 3)
 USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
-REG_WINDOW="${REG_WINDOW:-}"  # P-Reg stats window in frames (reg_window); empty = num_hist+num_pred. Larger than that grows the dataloader window (predictor context stays num_hist).
+REG_WINDOW="${REG_WINDOW:-7}"  # P-Reg stats window in frames (reg_window); empty = num_hist+num_pred. Larger than that grows the dataloader window (predictor context stays num_hist).
 
 # --- required dataset mount ------------------------------------------------
 export DATASET_DIR="${DATASET_DIR:-${KAGGLE_DATASET_MOUNT:-}}"
