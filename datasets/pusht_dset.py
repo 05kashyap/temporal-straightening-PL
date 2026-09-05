@@ -143,6 +143,7 @@ def load_pusht_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    reg_window=None,
     with_velocity=True,
 ):
     train_dset = PushTDataset(
@@ -161,6 +162,8 @@ def load_pusht_slice_train_val(
     )
 
     num_frames = num_hist + num_pred
+    if reg_window is not None:
+        num_frames = max(num_frames, int(reg_window))
     train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)
     val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip)
 

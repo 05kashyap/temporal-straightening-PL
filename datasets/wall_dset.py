@@ -114,7 +114,11 @@ def load_wall_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    reg_window=None,
 ):  
+    num_frames = num_hist + num_pred
+    if reg_window is not None:
+        num_frames = max(num_frames, int(reg_window))
     if split_mode == "random":
         dset = WallDataset(
             n_rollout=n_rollout,
@@ -125,7 +129,7 @@ def load_wall_slice_train_val(
         dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
             traj_dataset=dset, 
             train_fraction=split_ratio, 
-            num_frames=num_hist + num_pred, 
+            num_frames=num_frames, 
             frameskip=frameskip
         )
     elif split_mode == "folder":
@@ -141,7 +145,6 @@ def load_wall_slice_train_val(
             data_path=data_path + "/val",
             normalize_action=normalize_action,
         )
-        num_frames = num_hist + num_pred
         train_slices = TrajSlicerDataset(dset_train, num_frames, frameskip)
         val_slices = TrajSlicerDataset(dset_val, num_frames, frameskip)
 

@@ -52,6 +52,9 @@
 #   TRAIN_DECODER=True bash run.sh  # also train the VQVAE decoder (required for planner videos)
 #   NUM_HIST=4 bash run.sh       # predictor context frames (default 6; conf/train.yaml default is 3)
 #   USE_GRAD_CHECKPOINT=true bash run.sh  # gradient-checkpoint the predictor Transformer (memory <-> compute; default false = exact prior numerics)
+#   REG_WINDOW=7 bash run.sh    # P-Reg stats window of 7 frames (default = num_hist+num_pred). Can EXCEED
+#                               # num_hist+num_pred: the dataloader then feeds 7 frames/sample while the
+#                               # predictor context stays num_hist (isolate P-Reg window from context length)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -168,6 +171,7 @@ TRAIN_DECODER="${TRAIN_DECODER:-False}"  # also train the VQVAE decoder (require
 FRESH="${FRESH:-0}" # 1 = fresh
 NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3); training only
 USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
+REG_WINDOW="${REG_WINDOW:-}"  # P-Reg stats window in frames (reg_window); empty = num_hist+num_pred. Larger than that grows the dataloader window (predictor context stays num_hist).
 
 CKBPT="./checkpoints"
 
@@ -247,6 +251,10 @@ train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name, $4 
     if [ -n "$4" ]; then
         lr_arg=(training.encoder_lr="$4")
     fi
+    local reg_arg=()
+    if [ -n "$REG_WINDOW" ]; then
+        reg_arg=(reg_window="$REG_WINDOW")
+    fi
     "$PY" train.py --config-name train.yaml $TRAIN_TASK_OVERRIDES \
         training.straighten="$1" training.twothirds="$2" \
         training.batch_size="$BATCH_SIZE" training.epochs="$EPOCHS" \
@@ -254,6 +262,7 @@ train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name, $4 
         predictor.use_grad_checkpoint="$USE_GRAD_CHECKPOINT" \
         model.train_decoder="$TRAIN_DECODER" has_decoder="$TRAIN_DECODER" \
         "${lr_arg[@]}" \
+        "${reg_arg[@]}" \
         hydra.run.dir="$CKBPT/$3"
 }
 

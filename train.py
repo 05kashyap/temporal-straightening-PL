@@ -131,6 +131,7 @@ class Trainer:
             num_hist=self.cfg.num_hist,
             num_pred=self.cfg.num_pred,
             frameskip=self.cfg.frameskip,
+            reg_window=self.cfg.get("reg_window", None),
         )
 
         self.train_traj_dset = traj_dsets["train"]
@@ -385,6 +386,7 @@ class Trainer:
             vcreg_std_coeff=self.cfg.training.get("vcreg_std_coeff", 0),
             vcreg_cov_coeff=self.cfg.training.get("vcreg_cov_coeff", 0),
             vcreg_apply_to=self.cfg.training.get("vcreg_apply_to", "enc"),
+            reg_window=self.cfg.get("reg_window", None),
         )
         self._log_trainable_params(self.model, "model")
 
@@ -597,9 +599,9 @@ class Trainer:
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred, end_idx=self.model.num_pred + self.model.num_hist)
 
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
+                    state_tgt = state[:, self.model.num_pred : self.model.num_pred + self.model.num_hist]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
@@ -702,9 +704,9 @@ class Trainer:
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred, end_idx=self.model.num_pred + self.model.num_hist)
 
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
+                    state_tgt = state[:, self.model.num_pred : self.model.num_pred + self.model.num_hist]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)

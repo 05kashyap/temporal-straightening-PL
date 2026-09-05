@@ -23,6 +23,10 @@
 #                   default is 3). Same knob as run.sh's NUM_HIST.
 #     USE_GRAD_CHECKPOINT optional 'true' to gradient-checkpoint the predictor
 #                   Transformer (memory <-> compute; default false = exact prior numerics).
+#     REG_WINDOW    optional P-Reg stats window in frames (reg_window; default =
+#                   num_hist+num_pred). May EXCEED num_hist+num_pred: the dataloader
+#                   then feeds reg_window frames/sample while the predictor context
+#                   stays num_hist.
 #
 # Kaggle notes:
 #   - Run kaggle_setup.sh first (pip deps).
@@ -41,8 +45,9 @@ ENV="${1:-point_maze}"
 VARIANT="${2:-straighten}"
 EPOCHS_ARG="${3:-}"
 BATCH_ARG="${4:-}"
-NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3)
+NUM_HIST="${NUM_HIST:-3}"   # predictor context frames (conf/train.yaml default is 3)
 USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
+REG_WINDOW="${REG_WINDOW:-}"  # P-Reg stats window in frames (reg_window); empty = num_hist+num_pred. Larger than that grows the dataloader window (predictor context stays num_hist).
 
 # --- required dataset mount ------------------------------------------------
 export DATASET_DIR="${DATASET_DIR:-${KAGGLE_DATASET_MOUNT:-}}"
@@ -140,6 +145,11 @@ echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_h
 echo " has_decoder=False mixed_precision=no  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
+reg_arg=()
+if [ -n "$REG_WINDOW" ]; then
+    reg_arg=(reg_window="$REG_WINDOW")
+fi
+
 python train.py --config-name train.yaml \
     env="$ENV" \
     encoder="$ENCODER" \
@@ -154,4 +164,5 @@ python train.py --config-name train.yaml \
     has_decoder=False \
     model.train_decoder=False \
     env.num_workers=4 \
+    "${reg_arg[@]}" \
     hydra.run.dir="checkpoints/${ENV}_${VARIANT}"

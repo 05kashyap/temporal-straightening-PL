@@ -160,6 +160,7 @@ def load_point_maze_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    reg_window=None,
     use_preprocessed=False,
     use_frame_files=False,
 ):
@@ -171,10 +172,13 @@ def load_point_maze_slice_train_val(
         use_preprocessed=use_preprocessed,
         use_frame_files=use_frame_files,
     )
+    num_frames = num_hist + num_pred
+    if reg_window is not None:
+        num_frames = max(num_frames, int(reg_window))
     dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
         traj_dataset=dset, 
         train_fraction=split_ratio, 
-        num_frames=num_hist + num_pred, 
+        num_frames=num_frames, 
         frameskip=frameskip
     )
 

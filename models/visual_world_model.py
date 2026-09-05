@@ -28,6 +28,7 @@ class VWorldModel(nn.Module):
         train_decoder=True,
         straighten=False,
         twothirds=False,
+        reg_window=None,
         stop_grad=True,
         vcreg=False,
         vcreg_std_coeff=0,
@@ -55,6 +56,7 @@ class VWorldModel(nn.Module):
         self.straighten_scale = 0.0
         self.curvature_mode = None
         self.stop_grad = bool(stop_grad)
+        self.reg_window = int(reg_window) if reg_window is not None else None
         self.vcreg = bool(vcreg)
         self.std_coeff = float(vcreg_std_coeff)
         self.cov_coeff = float(vcreg_cov_coeff)
@@ -368,9 +370,9 @@ class VWorldModel(nn.Module):
         decoder_enabled = self.decoder is not None and self.train_decoder
         z = self.encode(obs, act)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
-        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
+        z_tgt = z[:, self.num_pred : self.num_pred + self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
-        visual_tgt = obs['visual'][:, self.num_pred :, ...]  # (b, num_hist, 3, img_size, img_size)
+        visual_tgt = obs['visual'][:, self.num_pred : self.num_pred + self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
 
         if self.predictor is not None:
             z_pred = self.predict(z_src)
@@ -425,6 +427,16 @@ class VWorldModel(nn.Module):
                 loss = loss + z_reg_loss
 
             feats = self.visual_only(z)
+            if self.reg_window is not None:
+                # Decouple the regularizers' variance window from num_hist: only the
+                # LAST reg_window encoded frames feed the straighten/two-thirds stats,
+                # so num_hist lengthens the predictor context without widening the
+                # residual-point window the P-Reg variance is computed over.
+                if self.reg_window < 3:
+                    raise ValueError(
+                        f"reg_window must be >= 3 (regularizers need >=3 frames), got {self.reg_window}"
+                    )
+                feats = feats[:, -self.reg_window :]
             if self.straighten and self.straighten_scale > 0:
                 curvature_loss = self.total_curvature(feats, mode=self.curvature_mode)
                 loss = loss + curvature_loss * self.straighten_scale
