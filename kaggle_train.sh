@@ -141,7 +141,7 @@ esac
 
 echo "================================================================"
 echo " env=$ENV variant=$VARIANT encoder=$ENCODER epochs=$EPOCHS"
-echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST use_grad_checkpoint=$USE_GRAD_CHECKPOINT"
+echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST use_grad_checkpoint=$USE_GRAD_CHECKPOINT reg_window=$REG_WINDOW"
 echo " has_decoder=False mixed_precision=no  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
