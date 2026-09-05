@@ -75,6 +75,7 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+        self.current_iter = 0  # batches completed in the current epoch pass (mid-epoch resume)
         self.decoder_start_epoch = int(self.cfg.training.get("decoder_start_epoch", 1))
         if self.decoder_start_epoch < 1:
             log.warning(
@@ -171,6 +172,7 @@ class Trainer:
 
         self._keys_to_save = [
             "epoch",
+            "current_iter",  # batches completed in the current epoch pass (mid-epoch resume)
         ]
         self._keys_to_save += (
             ["encoder", "encoder_optimizer"] if self.train_encoder else []
@@ -266,7 +268,9 @@ class Trainer:
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
         if model_ckpt.exists():
             self.load_ckpt(model_ckpt)
-            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+            log.info(
+                f"Resuming from epoch {self.epoch}, batch {self.current_iter}: {model_ckpt}"
+            )
 
         # initialize encoder
         if self.encoder is None:
@@ -476,8 +480,11 @@ class Trainer:
             )
             self.monitor_thread.start()
 
-        init_epoch = self.epoch + 1  # epoch starts from 1
-        for epoch in range(init_epoch, init_epoch + self.total_epochs):
+        # Resume semantics:
+        #   current_iter > 0  => `self.epoch` was interrupted mid-pass; finish that pass first.
+        #   current_iter == 0 => `self.epoch` is complete (fresh start at 0 -> epoch 1).
+        first_epoch = self.epoch if self.current_iter > 0 else self.epoch + 1  # epoch starts from 1
+        for epoch in range(first_epoch, first_epoch + self.total_epochs):
             self.epoch = epoch
             if self.accelerator.is_main_process:
                 decoder_active = self.decoder_training_active()
@@ -557,9 +564,28 @@ class Trainer:
         return logs
 
     def train(self):
-        for i, data in enumerate(
-            tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
-        ):
+        # Mid-epoch resume: skip the batches already consumed this epoch (self.current_iter).
+        start_iter = self.current_iter
+        try:
+            n_batches = len(self.dataloaders["train"])
+        except (TypeError, NotImplementedError):
+            n_batches = None
+        if start_iter > 0:
+            log.info(
+                "Epoch %d resuming from batch %d%s",
+                self.epoch,
+                start_iter,
+                f" / {n_batches}" if n_batches else "",
+            )
+        it = self.dataloaders["train"]
+        if start_iter > 0:
+            it = itertools.islice(it, start_iter, None)
+        iterator = tqdm(
+            it,
+            desc=f"Epoch {self.epoch} Train",
+            total=None if n_batches is None else max(0, n_batches - start_iter),
+        )
+        for i, data in enumerate(iterator, start=start_iter):
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             decoder_active = self.decoder_training_active()
@@ -655,12 +681,17 @@ class Trainer:
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
+            self.current_iter = i + 1  # batches completed so far this epoch (mid-epoch resume)
+
             if (
                 self.cfg.training.save_every_x_iterations > 0
                 and i % self.cfg.training.save_every_x_iterations == 0
             ):
                 self.logs_flash_iter(iteration=i)
                 self.save_ckpt()
+
+        # A full epoch pass just completed -> next resume starts at the following epoch.
+        self.current_iter = 0
 
     @torch.no_grad()
     def val(self):
