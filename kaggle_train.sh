@@ -17,6 +17,8 @@
 #                   seq_lengths.pth, obses/}. If you uploaded the dataset as a
 #                   Kaggle Dataset, use DATASET_DIR=/kaggle/input/<slug>.
 #     EPOCHS        optional override for epochs (3rd positional arg wins).
+#     NUM_HIST      optional predictor context frames (default 6; conf/train.yaml
+#                   default is 3). Same knob as run.sh's NUM_HIST.
 #
 # Kaggle notes:
 #   - Run kaggle_setup.sh first (pip deps).
@@ -34,6 +36,7 @@ cd "$(dirname "$0")"
 ENV="${1:-point_maze}"
 VARIANT="${2:-straighten}"
 EPOCHS_ARG="${3:-}"
+NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3)
 
 # --- required dataset mount ------------------------------------------------
 export DATASET_DIR="${DATASET_DIR:-${KAGGLE_DATASET_MOUNT:-}}"
@@ -121,7 +124,7 @@ esac
 
 echo "================================================================"
 echo " env=$ENV variant=$VARIANT encoder=$ENCODER epochs=$EPOCHS"
-echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH"
+echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST"
 echo " has_decoder=False mixed_precision=no  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
@@ -132,6 +135,7 @@ python train.py --config-name train.yaml \
     training.twothirds="$T_VAL" \
     training.batch_size="$BATCH" \
     training.epochs="$EPOCHS" \
+    num_hist="$NUM_HIST" \
     training.encoder_lr="$LR_USED" \
     training.mixed_precision=no \
     has_decoder=False \

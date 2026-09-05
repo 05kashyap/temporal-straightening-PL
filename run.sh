@@ -26,9 +26,10 @@
 #   (alpha=0) -- both are the plan_gd/plan_cem defaults, so no plan overrides.
 # ENV=granular / ENV=rope: DINO-WM deformable protocol (env=deformable_env, SoftGym).
 #   Training: 1000 x 20-step trajectories, frameskip=1 (DINO-WM App. Table 11) and
-#   100 epochs (App. Table 12). num_hist stays at 3 (not DINO-WM's H=1) because the
-#   straighten/two-thirds losses need >=3 latent frames per window -- H=1 crashes
-#   the curvature loss and makes the two-thirds variance vacuous. Eval follows the
+#   100 epochs (App. Table 12). num_hist defaults to 6 (NUM_HIST knob; not
+#   DINO-WM's H=1) because the straighten/two-thirds losses need >=3 latent
+#   frames per window -- H=1 crashes the curvature loss and makes the two-thirds
+#   variance vacuous. Eval follows the
 #   paper's MPC + Chamfer-Distance protocol on 10 instances (App. Table 8;
 #   open-loop CEM/GD are not reported for rope/granular), so PLANNERS defaults to
 #   gd_mpc + mpc_cem. Deformable planning steps the SoftGym sim through pyflex,
@@ -49,6 +50,7 @@
 #   BATCH_SIZE=8 bash run.sh      # smaller batch if memory is ever tight
 #   N_EVALS=10 bash run.sh       # fewer eval episodes for faster planning
 #   TRAIN_DECODER=True bash run.sh  # also train the VQVAE decoder (required for planner videos)
+#   NUM_HIST=4 bash run.sh       # predictor context frames (default 6; conf/train.yaml default is 3)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -81,8 +83,9 @@ ENV="${ENV:-point_maze_medium}"     # task: point_maze | pusht | wall (default) 
 #    in chunks of 10 to stay within memory. CEM uses the paper's num_samples=200,
 #    rolled out in chunks of 50 (CEM_SAMPLE_CHUNK_SIZE) to fit the same GPU.
 #  - granular/rope use the DINO-WM deformable protocol: env=deformable_env,
-#    encoder=dino_channel, frameskip=1, 100 epochs; num_hist=3 is kept so the
-#    regularizers are well-defined. Eval is MPC (gd_mpc/mpc_cem) on 10 instances.
+#    encoder=dino_channel, frameskip=1, 100 epochs; num_hist defaults to 6
+#    (>=3) so the regularizers are well-defined. Eval is MPC (gd_mpc/mpc_cem)
+#    on 10 instances.
 case "$ENV" in
     pusht)
         BATCH_SIZE="${BATCH_SIZE:-16}"  # paper default 32 OOMs the 12 GB GPU (dino_channel 14x14 attention); 16 fits, 8 is the safe fallback
@@ -107,11 +110,12 @@ case "$ENV" in
     granular|rope)
         # DINO-WM deformable protocol (App. Tables 11/12): 1000 x 20-step
         # trajectories, frameskip=1, 100 epochs, MPC eval on 10 instances.
-        # num_hist stays 3 (not DINO-WM's H=1): the straighten/two-thirds losses
-        # require >=3 latent frames per window (H=1 crashes total_curvature).
-        # H=3 also makes the 14x14 predictor as heavy as wall's -> batch 16
-        # (the paper's batch 32 would OOM the 12 GB GPU, same as pusht/wall).
-        BATCH_SIZE="${BATCH_SIZE:-16}"  # same 14x14 attention as pusht/wall at H=3: 32 OOMs, 16 fits
+        # num_hist defaults to 6 (NUM_HIST knob; not DINO-WM's H=1): the
+        # straighten/two-thirds losses require >=3 latent frames per window
+        # (H=1 crashes total_curvature). The 14x14 channel predictor at H=6 is
+        # memory-hungry -> batch 16 by default (batch 32 OOMs the 12 GB GPU,
+        # same as pusht/wall; drop to 8 if memory is tight).
+        BATCH_SIZE="${BATCH_SIZE:-16}"  # same 14x14 attention as pusht/wall (H=6 default): 32 OOMs, 16 fits
         STRAIGHTEN="${STRAIGHTEN:-aggcos1e-1}"
         TWOTHIRDS="${TWOTHIRDS:-aggtwothirds5e-2}"
         EPOCHS="${EPOCHS:-50}"   # DINO-WM App. Table 12 (100 epochs, fs=1)
@@ -161,6 +165,7 @@ PLANNERS="${PLANNERS:-gd cem}"   # planners with configs in conf/plan_*.yaml
 GOAL_H="${GOAL_H:-25}"           # keep divisible by frameskip (5)
 TRAIN_DECODER="${TRAIN_DECODER:-False}"  # also train the VQVAE decoder (required for planner videos)
 FRESH="${FRESH:-0}" # 1 = fresh
+NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3); training only
 
 CKBPT="./checkpoints"
 
@@ -219,7 +224,7 @@ case "$ENV" in
         # planning reloads) carries the right object. Eval uses the paper's MPC
         # planners (plan_gd_mpc / plan_mpc_cem); mode=last + alpha=0 keep the
         # objective on the final-frame image only (DINO-WM's C = ||z_T - z_g||^2).
-        TRAIN_TASK_OVERRIDES="env=deformable_env env.kwargs.object_name=${ENV} env.dataset.object_name=${ENV} encoder=dino_channel num_hist=3 frameskip=1"
+        TRAIN_TASK_OVERRIDES="env=deformable_env env.kwargs.object_name=${ENV} env.dataset.object_name=${ENV} encoder=dino_channel frameskip=1"
         PLAN_TASK_OVERRIDES="objective.alpha=0 objective.mode=last"
         RUN_FALSE="test/${ENV}_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         RUN_TRUE="test/${ENV}_${STRAIGHTEN}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
@@ -243,6 +248,7 @@ train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name, $4 
     "$PY" train.py --config-name train.yaml $TRAIN_TASK_OVERRIDES \
         training.straighten="$1" training.twothirds="$2" \
         training.batch_size="$BATCH_SIZE" training.epochs="$EPOCHS" \
+        num_hist="$NUM_HIST" \
         model.train_decoder="$TRAIN_DECODER" has_decoder="$TRAIN_DECODER" \
         "${lr_arg[@]}" \
         hydra.run.dir="$CKBPT/$3"
