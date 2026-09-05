@@ -6,10 +6,12 @@
 # loaded trajectories -- no simulator involved.)
 #
 # Usage:
-#     bash kaggle_train.sh <env> <variant> [epochs]
+#     bash kaggle_train.sh <env> <variant> [epochs] [batch_size]
 #
-#     env:     point_maze | point_maze_medium | pusht | wall
-#     variant: baseline | straighten | twothirds | both     (default: straighten)
+#     env:        point_maze | point_maze_medium | pusht | wall
+#     variant:    baseline | straighten | twothirds | both     (default: straighten)
+#     epochs:     optional (defaults per env: 20, pusht = 2)
+#     batch_size: optional (defaults per env: mazes 32, pusht/wall 16)
 #
 # Environment variables:
 #     DATASET_DIR   (required) folder that CONTAINS the env dataset directory,
@@ -36,6 +38,7 @@ cd "$(dirname "$0")"
 ENV="${1:-point_maze}"
 VARIANT="${2:-straighten}"
 EPOCHS_ARG="${3:-}"
+BATCH_ARG="${4:-}"
 NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3)
 
 # --- required dataset mount ------------------------------------------------
@@ -93,6 +96,12 @@ case "$ENV" in
 esac
 
 EPOCHS="${EPOCHS_ARG:-$DEF_EPOCHS}"
+# batch_size: positional arg wins, then $BATCH_SIZE env var, then per-env default.
+if [ -n "$BATCH_ARG" ]; then
+    BATCH="$BATCH_ARG"
+elif [ -n "${BATCH_SIZE:-}" ]; then
+    BATCH="$BATCH_SIZE"
+fi
 
 # --- variant -> straighten/twothirds/lr ------------------------------------
 case "$VARIANT" in
