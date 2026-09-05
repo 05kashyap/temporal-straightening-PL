@@ -72,7 +72,7 @@ case "$ENV" in
         ENCODER=dino_channel
         STRAIGHTEN="aggcos1e-1"
         TWOTHIRDS="aggtwothirds5e-2"
-        BATCH=32                 # 14x14 channel attention; 32 OOMs a 16GB GPU
+        BATCH=16                 # 14x14 channel attention; 32 OOMs a 16GB GPU
         DEF_EPOCHS=2             # paper Appendix A.3
         LR=1e-5
         LR_BASELINE=1e-5
