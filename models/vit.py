@@ -1,5 +1,6 @@
 # adapted from https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py
 import torch
+import torch.utils.checkpoint
 from torch import nn
 from einops import rearrange, repeat
 
@@ -80,9 +81,11 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.,
+                 use_grad_checkpoint=False):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
+        self.use_grad_checkpoint = use_grad_checkpoint
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -92,13 +95,21 @@ class Transformer(nn.Module):
 
     def forward(self, x):
         for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
+            if self.use_grad_checkpoint and self.training and torch.is_grad_enabled():
+                x = torch.utils.checkpoint.checkpoint(
+                    lambda x, attn=attn: attn(x) + x, x, use_reentrant=False
+                )
+                x = torch.utils.checkpoint.checkpoint(
+                    lambda x, ff=ff: ff(x) + x, x, use_reentrant=False
+                )
+            else:
+                x = attn(x) + x
+                x = ff(x) + x
 
         return self.norm(x)
     
 class ViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0., use_grad_checkpoint=False):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -109,7 +120,8 @@ class ViTPredictor(nn.Module):
 
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout,
+                                       use_grad_checkpoint=use_grad_checkpoint)
         self.pool = pool
 
     def forward(self, x): # x: (b, window_size * H/patch_size * W/patch_size, 384)

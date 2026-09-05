@@ -21,6 +21,8 @@
 #     EPOCHS        optional override for epochs (3rd positional arg wins).
 #     NUM_HIST      optional predictor context frames (default 6; conf/train.yaml
 #                   default is 3). Same knob as run.sh's NUM_HIST.
+#     USE_GRAD_CHECKPOINT optional 'true' to gradient-checkpoint the predictor
+#                   Transformer (memory <-> compute; default false = exact prior numerics).
 #
 # Kaggle notes:
 #   - Run kaggle_setup.sh first (pip deps).
@@ -40,6 +42,7 @@ VARIANT="${2:-straighten}"
 EPOCHS_ARG="${3:-}"
 BATCH_ARG="${4:-}"
 NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3)
+USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
 
 # --- required dataset mount ------------------------------------------------
 export DATASET_DIR="${DATASET_DIR:-${KAGGLE_DATASET_MOUNT:-}}"
@@ -133,7 +136,7 @@ esac
 
 echo "================================================================"
 echo " env=$ENV variant=$VARIANT encoder=$ENCODER epochs=$EPOCHS"
-echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST"
+echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST use_grad_checkpoint=$USE_GRAD_CHECKPOINT"
 echo " has_decoder=False mixed_precision=no  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
@@ -145,6 +148,7 @@ python train.py --config-name train.yaml \
     training.batch_size="$BATCH" \
     training.epochs="$EPOCHS" \
     num_hist="$NUM_HIST" \
+    predictor.use_grad_checkpoint="$USE_GRAD_CHECKPOINT" \
     training.encoder_lr="$LR_USED" \
     training.mixed_precision=no \
     has_decoder=False \

@@ -51,6 +51,7 @@
 #   N_EVALS=10 bash run.sh       # fewer eval episodes for faster planning
 #   TRAIN_DECODER=True bash run.sh  # also train the VQVAE decoder (required for planner videos)
 #   NUM_HIST=4 bash run.sh       # predictor context frames (default 6; conf/train.yaml default is 3)
+#   USE_GRAD_CHECKPOINT=true bash run.sh  # gradient-checkpoint the predictor Transformer (memory <-> compute; default false = exact prior numerics)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -166,6 +167,7 @@ GOAL_H="${GOAL_H:-25}"           # keep divisible by frameskip (5)
 TRAIN_DECODER="${TRAIN_DECODER:-False}"  # also train the VQVAE decoder (required for planner videos)
 FRESH="${FRESH:-0}" # 1 = fresh
 NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3); training only
+USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
 
 CKBPT="./checkpoints"
 
@@ -249,6 +251,7 @@ train() {  # $1 = straighten value, $2 = twothirds value, $3 = run dir name, $4 
         training.straighten="$1" training.twothirds="$2" \
         training.batch_size="$BATCH_SIZE" training.epochs="$EPOCHS" \
         num_hist="$NUM_HIST" \
+        predictor.use_grad_checkpoint="$USE_GRAD_CHECKPOINT" \
         model.train_decoder="$TRAIN_DECODER" has_decoder="$TRAIN_DECODER" \
         "${lr_arg[@]}" \
         hydra.run.dir="$CKBPT/$3"
