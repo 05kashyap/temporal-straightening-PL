@@ -95,7 +95,7 @@ class Transformer(nn.Module):
 
     def forward(self, x):
         for attn, ff in self.layers:
-            if self.use_grad_checkpoint and self.training and torch.is_grad_enabled():
+            if getattr(self, "use_grad_checkpoint", False) and self.training and torch.is_grad_enabled():
                 x = torch.utils.checkpoint.checkpoint(
                     lambda x, attn=attn: attn(x) + x, x, use_reentrant=False
                 )

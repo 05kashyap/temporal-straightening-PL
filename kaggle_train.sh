@@ -64,7 +64,7 @@ case "$ENV" in
     point_maze)
         ENCODER=dino_global
         STRAIGHTEN="cos1e-1"
-        TWOTHIRDS="twothirds5e-2"
+        TWOTHIRDS="twothirds1e-2"
         BATCH=32
         DEF_EPOCHS=20
         LR=1e-5

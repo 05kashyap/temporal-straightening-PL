@@ -354,8 +354,23 @@ class VWorldModel(nn.Module):
         else:
             raise ValueError(f"Unknown two-thirds mode '{mode}'. Use 'cos' or 'aggcos'.")
 
-        r = self._two_thirds_residual(v1, v2)         # (b, t') or (b, t', p)
-        return r.var(dim=1, unbiased=False).mean()     # grouped var over time, then mean
+        r = self._two_thirds_residual(v1, v2)         # (b, t') or (b, t', p), t' = n_frames - 2
+
+        # LOCAL two-thirds loss: enforce constancy of r over CONSECUTIVE residual
+        # points, not over the whole window. The 2/3 power law is a local invariant,
+        # and the original loss (a biased variance over t'=2 residuals) was exactly
+        # (r_1 - r_0)^2 / 4 = the variance of one adjacent (r_i, r_{i+1}) pair.
+        # Averaging the biased variance of each adjacent residual pair generalizes
+        # that to any window length while staying local: it reduces to the original
+        # value when t'=2 and, unlike a global var over the window, does not grow
+        # with legitimate low-frequency drift in r (window-length invariant).
+        if r.shape[1] < 2:
+            # Single residual point -> no constancy constraint (matches old code,
+            # where var over one point was exactly 0).
+            return torch.zeros((), device=r.device, dtype=r.dtype)
+        adjacent_diff = r[:, 1:] - r[:, :-1]            # (b, t'-1, ...)
+        pair_variance = adjacent_diff.pow(2) / 4.0      # biased var of each pair
+        return pair_variance.mean()
 
     def forward(self, obs, act):
         """
