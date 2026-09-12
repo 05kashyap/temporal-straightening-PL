@@ -17,6 +17,14 @@
 #     planner: gd_mpc | mpc_cem | both (default)
 #   bash run_mpc.sh <env>             # full faithful MPC (default)
 #   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate
+#   SEEDS="0 1 2" bash run_mpc.sh <env>  # FULL runs: one plan.py run per seed, report mean +/- std (default: 100 101 102)
+#   For every (model, planner), the multi-seed mean +/- std (and per-seed values for
+#   all final_eval metrics) is persisted to plan_outputs_<planner>/summaries/<model>_gH<goal_H>.json.
+#
+# By default CKBPT is a DIRECTORY of model run dirs and each run dir's checkpoint is
+# auto-discovered (checkpoints/<run_dir>/model_latest.pth). To run on one exact
+# checkpoint instead, point CKBPT at the checkpoint FILE:
+#   CKBPT=checkpoints/win7/pointmaze/model_latest.pth bash run_mpc.sh <env> [variant] [planner]
 #
 # FULL=0 validation mode, per selected (model, planner):
 #   1) setup measurement : max_iter=1, opt_steps=0 (model/dset/workspace + evals)
@@ -35,10 +43,37 @@ export WANDB_MODE
 PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 CKBPT="${CKBPT:-checkpoints/test}"   # run.sh stores trained models under checkpoints/test/
 
+# Direct-checkpoint mode: if CKBPT points at an existing checkpoint .pth file, run MPC
+# on that exact file instead of auto-discovering model run dirs inside a directory.
+if [ -f "$CKBPT" ] && [[ "$CKBPT" == *.pth ]]; then
+    DIRECT_CKBPT=1
+else
+    DIRECT_CKBPT=0
+fi
+
+# Run-dir fallback: if CKBPT is a directory that itself holds a checkpoint .pth file
+# (i.e. it IS a single run dir, not a parent of model run dirs), use that checkpoint.
+if [ "$DIRECT_CKBPT" = "0" ] && [ -d "$CKBPT" ]; then
+    _pths=()
+    for _f in "$CKBPT"/*.pth; do
+        [ -f "$_f" ] && _pths+=("$_f")
+    done
+    if [ "${#_pths[@]}" -eq 1 ]; then
+        CKBPT="${_pths[0]}"
+        DIRECT_CKBPT=1
+        echo "run-dir checkpoint detected: using $CKBPT"
+    elif [ "${#_pths[@]}" -gt 1 ] && [ -f "$CKBPT/model_latest.pth" ]; then
+        CKBPT="$CKBPT/model_latest.pth"
+        DIRECT_CKBPT=1
+        echo "run-dir checkpoint detected: using $CKBPT"
+    fi
+fi
+
 ENV_SEL="${1:-}"
 VARIANT="${2:-all}"
 PLANNER_SEL="${3:-both}"
 FULL="${FULL:-1}"   # full faithful MPC by default; FULL=0 = validation (OOM + estimate)
+SEEDS="${SEEDS:-100 101 102}"  # eval seeds for FULL runs: one plan.py run per seed, then mean +/- std
 
 if [ -z "$ENV_SEL" ]; then
     echo "usage: bash run_mpc.sh <env> [variant] [planner]"
@@ -159,12 +194,39 @@ obj_for() {  # $1 = planner
     fi
 }
 
+get_sr() {  # $1 = logs.json
+    grep -oE '"final_eval/success_rate": ?[0-9.]+' "$1" 2>/dev/null | tail -1 | grep -oE '[0-9.]+'
+}
+
+report_mean_std() {  # $1 planner, $2 model, $3 goal_H, $4... seeds
+    local planner="$1" model="$2" goal_h="$3"; shift 3
+    if [ "$#" -eq 0 ]; then
+        echo "  === $planner / $model: no seeds selected -> no mean/std ==="
+        return
+    fi
+    # Aggregate the per-seed logs.json files and persist mean +/- std (for every
+    # final_eval metric) to plan_outputs_<planner>/summaries/<model>_gH<goal_h>.json.
+    # It also prints the legacy console summary line. rc=1 => no seed had results.
+    if ! "$PY" "$PWD/aggregate_mpc_summary.py" "$planner" "$model" "$goal_h" "$@"; then
+        echo "  === $planner / $model: no seed runs with final_eval/success_rate -> no mean/std ==="
+    fi
+}
+
+
+ckpt_full() {  # $1 = model run dir name (unused in direct-checkpoint mode)
+    if [ "$DIRECT_CKBPT" = "1" ]; then
+        if [[ "$CKBPT" = /* ]]; then echo "$CKBPT"; else echo "$PWD/$CKBPT"; fi
+    else
+        if [[ "$CKBPT" = /* ]]; then echo "$CKBPT/$1"; else echo "$PWD/$CKBPT/$1"; fi
+    fi
+}
+
 run_plan() {  # $1 planner, $2 model, $3 run.dir, $4 n_evals, $5 max_iter, $6... extra args
     local planner="$1" model="$2" rundir="$3" n_evals="$4" max_iter="$5"; shift 5
     local cfg="plan_${planner}.yaml"
     mkdir -p "$(dirname "$rundir")"
     "$PY" plan.py --config-name "$cfg" \
-        ckpt_base_path="$PWD/$CKBPT/$model" model_name="$model" \
+        ckpt_base_path="$(ckpt_full "$model")" model_name="$model" \
         hydra.run.dir="$rundir" \
         goal_H="$GOAL_H" n_evals="$n_evals" \
         planner.max_iter="$max_iter" chunk_size="$S_CHUNK" $(obj_for "$planner") "$@"
@@ -179,7 +241,7 @@ print_full_cmd() {  # $1 planner, $2 model
         extra="planner.sub_planner.opt_steps=$GD_OPT"
     fi
     echo "  FULL: $PY plan.py --config-name $cfg \\"
-    echo "        ckpt_base_path=$PWD/$CKBPT/$model model_name=$model \\"
+    echo "        ckpt_base_path=$(ckpt_full "$model") model_name=$model \\"
     echo "        hydra.run.dir=plan_outputs_${planner}/${model}_gH${GOAL_H} \\"
     echo "        goal_H=$GOAL_H n_evals=$FULL_N_EVALS chunk_size=$S_CHUNK \\"
     echo "        planner.max_iter=$FULL_MAX_ITER $(obj_for "$planner") $extra"
@@ -222,33 +284,50 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
 }
 # --- run ----------------------------------------------------------------------
 echo "=== run_mpc.sh: env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL ==="
-for i in "${IDX[@]}"; do
-    model="${MODELS[$i]}"
-    if [ -z "$model" ] || [ ! -d "$CKBPT/$model" ]; then
+if [ "$DIRECT_CKBPT" = "1" ]; then
+    echo "direct-checkpoint mode: running MPC on $CKBPT"
+    model="$(basename "$CKBPT")"
+    model="${model%.pth}"
+    MODELS_SEL=( "$model" )
+else
+    MODELS_SEL=()
+    for i in "${IDX[@]}"; do
+        MODELS_SEL+=( "${MODELS[$i]}" )
+    done
+fi
+for model in "${MODELS_SEL[@]}"; do
+    if [ "$DIRECT_CKBPT" != "1" ] && { [ -z "$model" ] || [ ! -d "$CKBPT/$model" ]; }; then
         echo "[skip] model not available for this env: $CKBPT/$model"
         continue
     fi
     for planner in "${PLANNERS[@]}"; do
         if [ "$FULL" = "1" ]; then
-            echo "===== FULL MPC: $planner / $model ====="
-            rundir="plan_outputs_${planner}/${model}_gH${GOAL_H}"
-            # fresh run: logs.json is append-mode, so a crashed/partial dir
-            # would otherwise corrupt the new run's results.
-            rm -rf "$rundir"
-            if [ "$planner" = "gd_mpc" ]; then
-                run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
-                    planner.sub_planner.opt_steps="$GD_OPT"
-            else
-                # num_samples/opt_steps come from the plan_mpc_cem.yaml defaults
-                # (300 / 30); only the GPU-memory chunk size is overridden here.
-                run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
-                    planner.sub_planner.sample_chunk_size="$CEM_CHUNK"
-            fi
-            rc=$?
-            echo "  full run rc=$rc (results in $rundir/logs.json)"
+            echo "===== FULL MPC: $planner / $model (seeds: $SEEDS) ====="
+            for s in $SEEDS; do
+                rundir="plan_outputs_${planner}/${model}_s${s}_gH${GOAL_H}"
+                # fresh run: logs.json is append-mode, so a crashed/partial dir
+                # would otherwise corrupt the new run's results.
+                rm -rf "$rundir"
+                if [ "$planner" = "gd_mpc" ]; then
+                    run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
+                        seed="$s" planner.sub_planner.opt_steps="$GD_OPT"
+                else
+                    # num_samples/opt_steps come from the plan_mpc_cem.yaml defaults
+                    # (300 / 30); only the GPU-memory chunk size is overridden here.
+                    run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
+                        seed="$s" planner.sub_planner.sample_chunk_size="$CEM_CHUNK"
+                fi
+                rc=$?
+                sr=$(get_sr "$rundir/logs.json")
+                if [ -z "$sr" ]; then
+                    echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    continue
+                fi
+                echo "  seed $s success_rate=$sr"
+            done
+            report_mean_std "$planner" "$model" "$GOAL_H" $SEEDS
             continue
         fi
-
         echo "===== validate: $planner / $model ====="
         log1="plan_outputs_${planner}/validate_${model}_setup.log"
         if [ "$planner" = "gd_mpc" ]; then

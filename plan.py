@@ -530,13 +530,45 @@ def planning_main(cfg_dict):
 
     ckpt_base_path = cfg_dict["ckpt_base_path"]
     model_name = cfg_dict.get("model_name")
-    if ckpt_base_path.startswith("/"):
-        model_path = ckpt_base_path
+    # Direct-checkpoint mode: if ckpt_base_path is an existing checkpoint .pth file,
+    # load that exact file. The run dir that holds hydra.yaml is the file's own
+    # directory, or one level up when the checkpoint lives under <run_dir>/checkpoints/.
+    if os.path.isfile(ckpt_base_path):
+        direct_ckpt_file = Path(os.path.abspath(ckpt_base_path))
+        model_path = os.path.dirname(os.path.abspath(ckpt_base_path))
+        if not os.path.isfile(os.path.join(model_path, "hydra.yaml")):
+            _parent = os.path.dirname(model_path)
+            if os.path.isfile(os.path.join(_parent, "hydra.yaml")):
+                model_path = _parent
     else:
-        model_path = f"{ckpt_base_path}/{cfg_dict['model_name']}/"
+        direct_ckpt_file = None
+        if ckpt_base_path.startswith("/"):
+            model_path = ckpt_base_path
+        else:
+            model_path = f"{ckpt_base_path}/{cfg_dict['model_name']}/"
     model_path = os.path.abspath(model_path)
-    with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
-        model_cfg = OmegaConf.load(f)
+    # Load the training run config that carries the env/dataset settings. Downloaded
+    # run folders sometimes name the resolved config differently (hydra.yaml from the
+    # training run, config.yaml from Kaggle exports, .hydra/config.yaml from hydra) or
+    # sit next to a raw conf/train.yaml copy that has no top-level `env`. Pick the
+    # first candidate that actually has an `env` block.
+    model_cfg = None
+    _cfg_path = None
+    for _name in ("hydra.yaml", "config.yaml", ".hydra/config.yaml"):
+        _p = os.path.join(model_path, _name)
+        if os.path.isfile(_p):
+            with open(_p, "r") as f:
+                _cand = OmegaConf.load(f)
+            if "env" in _cand:
+                model_cfg = _cand
+                _cfg_path = _p
+                break
+    if model_cfg is None:
+        _cfg_path = os.path.join(model_path, "hydra.yaml")
+        with open(_cfg_path, "r") as f:
+            model_cfg = OmegaConf.load(f)
+    if os.path.basename(_cfg_path) != "hydra.yaml":
+        print(f"[plan.py] loaded run config from {_cfg_path}")
 
     # Checkpoints store the ABSOLUTE dataset path of the machine they were
     # trained on (e.g. /home/<user>/.../data/datasets/point_maze_medium). If that
@@ -573,9 +605,12 @@ def planning_main(cfg_dict):
     dset = dset["valid"]
 
     num_action_repeat = model_cfg.num_action_repeat
-    model_ckpt = (
-        Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
-    )
+    if direct_ckpt_file is not None:
+        model_ckpt = direct_ckpt_file
+    else:
+        model_ckpt = (
+            Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
+        )
     model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
     t_after_model = time.perf_counter()
     print(f"[timing] setup_model_s={t_after_model - t_start:.3f}", flush=True)

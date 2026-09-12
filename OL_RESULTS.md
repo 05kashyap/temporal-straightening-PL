@@ -35,21 +35,43 @@ Each eval episode is executed in the real sim and re-planned until success or th
 
 ## MPC settings
 
-- `n_evals=50` - 50 executed episodes, `goal_H=25`,`seed=100` (eval on single seed)
-- MPC loop: `n_taken_actions=5` (1 latent with frameskip = 5), `max_iter=4` (safety cap; exits early on success)
-- **GD-MPC**: sub-planner GD, `opt_steps=100`, Adam `lr=0.1`, zero init
-
-- Objectives: umaze/medium `objective.alpha=0 mode=all` (weighted intermediate-state loss); pusht GD-MPC `alpha=1 mode=staged`; pusht CEM `alpha=1 mode=last`
+- `n_evals=50` - 50 executed episodes per eval; `SEEDS="100 101 102"` runs one plan.py eval per seed and
+  reports mean +/- std (per-seed `logs.json` lives in `plan_outputs_<planner>/`, aggregated in
+  `plan_outputs_<planner>/summaries/`).
+- `goal_H=25` - the **goal horizon**. Each eval's start and goal states are sampled from the same held-out
+  trajectory segment (`goal_source='dset'`), with the goal state taken 25 env steps after the start state.
+  The goal is therefore guaranteed to be reachable from its start within 25 steps. Because the world model
+  steps at `frameskip=5`, 25 env frames = 5 model steps; plan.py divides `goal_H` by `frameskip` and the
+  sub-planner's lookahead horizon is set to exactly this.
+- MPC loop: `n_taken_actions=5` env actions (= 1 world-model step, frameskip 5) executed per iteration,
+  `max_iter=20` (safety cap; the loop exits early on success). Every iteration re-plans the full remaining
+  horizon in latent space and executes its first `n_taken_actions` actions in the real sim.
+- **Sub-planners** -- both score action sequences with the same latent-space objective, but they differ in
+  *how* and *how many* candidates they evaluate, which is why the reported planning budgets differ:
+  - **GD-MPC** (`planning/gd.py`): gradient-based. One action sequence per episode is a *differentiable*
+    tensor optimized by Adam (`lr=0.1`, zero init, cosine schedule) for `opt_steps=100` iterations (all
+    episodes batched through the same rollouts). Each iteration is a full world-model rollout **with
+    backprop**, so the per-episode planning budget is just **`opt_steps`** (= 100 gradient steps per
+    replan); there is no sample count and the cost does not scale with one.
+  - **CEM-MPC** (`planning/cem.py`): derivative-free stochastic search. Each of `opt_steps=30` iterations
+    independently draws `num_samples=300` candidate action sequences per episode from a Gaussian
+    `N(mu, sigma)`, rolls them out in parallel under `no_grad`, keeps the `topk=30` lowest-objective
+    elites, and refits `mu`/`sigma` from them (the mean is executed). Every candidate costs only a
+    forward pass, so the per-episode planning budget is **`num_samples x opt_steps`**
+    (300 x 30 = 9,000 forward rollouts per replan) -- two orders of magnitude more objective evaluations
+    than GD's 100, at the price of having no gradient signal to guide the search.
+- Objectives: umaze/medium `objective.alpha=0 mode=all` (weighted intermediate-state loss); pusht GD-MPC
+  `alpha=1 mode=staged`; pusht CEM `alpha=1 mode=last`.
 
 ---
 ## PushT
 
 | Variant | GD success_rate | GD state-dist | GD visual-dist | GD proprio-dist | CEM success_rate | CEM state-dist |
 |---|---|---|---|---|---|---|
-| baseline | 0.720 | 118.1 | 3.164 | 42.42 | — | — |
-| straighten | 0.860 | 70.3 | 2.681 | 24.76 | — | — |
-| p-reg | 0.840 | 57.2 | 3.007 | 20.88 | — | — |
-| **p-reg+straighten** | **0.920** | 53.8 | 2.707 | 19.22 | — | — |
+| baseline | 0.7134 +/- 0.0573 | 117.6407 +/- 3.4748 | 3.2984 +/- 0.2459 | 40.6807 +/- 2.0840 | — | — |
+| straighten | 0.8267 +/- 0.0249 | 77.6528 +/- 5.4283 | 2.6689 +/- 0.0680 | 28.4118 +/- 1.9050 | — | — |
+| p-reg | 0.8467 +/- 0.0094| 66.2865 +/- 4.5531 | 2.8093 +/- 0.1436 | 20.88 | — | — |
+| **p-reg+straighten** | **0.9134 +/- 0.0094** | 58.8011 +/- 3.576| 2.6964 +/- 0.0586 | 21.6437 +/- 1.6288 | — | — |
 
 - Planning cost (total MPC iters / 50 eps): GD 520/413/432/378 (baseline / straighten / p-reg  /
   both).
@@ -66,6 +88,14 @@ Each eval episode is executed in the real sim and re-planned until success or th
 - Planning cost (total MPC iters / 50 eps): GD 541/366/549/311 (baseline / straighten / p-reg  /
   both) — fewer iterations means earlier success on average.
 
+### Tests with three seeds
+
+| Variant | GD success_rate | GD state-dist | GD visual-dist | GD proprio-dist | CEM success_rate | CEM state-dist |
+|---|---|---|---|---|---|---|
+
+| straighten |  |  |  |  | — | — |
+| p-reg +straighten (Win3) | 0.7400 +/- 0.0589 |  |  |  | — | — |
+| p-reg +straighten (Win7) | **0.7867 +/- 0.0525** |  |  |  | — | — |
 ## PointMaze-medium
 
 | Variant | GD success_rate | GD state-dist | GD visual-dist | GD proprio-dist | CEM success_rate | CEM state-dist |

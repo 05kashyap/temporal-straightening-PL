@@ -324,17 +324,17 @@ if [ "$FRESH" = "1" ]; then
     rm -rf "$CKBPT/$RUN_FALSE" "$CKBPT/$RUN_TRUE" "$CKBPT/$RUN_TWOTHIRDS" "$CKBPT/$RUN_BOTH"
 fi
 
-# # ---- step 1 & 2: baseline (no regularizers) ---------------------------------
-# echo "===================== 1) TRAIN baseline (straighten=False) ============="
-# train False False "$RUN_FALSE" 1e-6  # paper Table 3 footnote: baseline (no straightening) uses lr 1e-6; the rest use 1e-5
-# echo "===================== 2) EVAL baseline model ==========================="
-# plan_model "$RUN_FALSE"
+# ---- step 1 & 2: baseline (no regularizers) ---------------------------------
+echo "===================== 1) TRAIN baseline (straighten=False) ============="
+train False False "$RUN_FALSE" 1e-6  # paper Table 3 footnote: baseline (no straightening) uses lr 1e-6; the rest use 1e-5
+echo "===================== 2) EVAL baseline model ==========================="
+plan_model "$RUN_FALSE"
 
-# # ---- step 3 & 4: straightening ----------------------------------------------
-# echo "===================== 3) TRAIN (straighten=$STRAIGHTEN) ==============="
-# train "$STRAIGHTEN" False "$RUN_TRUE"
-# echo "===================== 4) EVAL straightening model ======================"
-# plan_model "$RUN_TRUE"
+# ---- step 3 & 4: straightening ----------------------------------------------
+echo "===================== 3) TRAIN (straighten=$STRAIGHTEN) ==============="
+train "$STRAIGHTEN" False "$RUN_TRUE"
+echo "===================== 4) EVAL straightening model ======================"
+plan_model "$RUN_TRUE"
 
 # ---- step 5 & 6: two-thirds regularizer only ---------------------------------
 echo "===================== 5) TRAIN (twothirds=$TWOTHIRDS) =================="

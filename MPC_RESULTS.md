@@ -119,3 +119,16 @@ not a paper-reported metric.
 suggestive but not ironclad; the cleanest signal is pusht/umaze "both ≥ straighten" under GD-MPC,
 consistent with the open-loop findings in `RESULTS.md`.
 
+
+Linear Probe
+Simple MLP on the encoder 
+How much info about the state of the agent can we recover?
+Fit MLP on train set to predict the state of the agent
+
+Visu
+-Latent space curv vs env traj (in temo str paper)
+
+Do these exp first, 
+
+Simulate a dataset with more noisy trajectories 
+- See if Preg helps there.
