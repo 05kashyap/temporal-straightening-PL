@@ -31,7 +31,7 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_MODE
-PY="${PYTHON:-/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python}"
+PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
 CKBPT="${CKBPT:-checkpoints/test}"   # run.sh stores trained models under checkpoints/test/
 
 ENV_SEL="${1:-}"
