@@ -14,6 +14,8 @@
 #     env:     umaze | medium | pusht | wall
 #     variant: all (default) | False | straighten | twothirds | both
 #     planner: gd_mpc | mpc_cem | both (default)
+#   Any extra trailing args are forwarded to plan.py as hydra overrides, e.g.:
+#     bash run_mpc.sh medium both gd_mpc objective.mode=all
 #   bash run_mpc.sh <env>             # full faithful MPC (default)
 #   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate
 #
@@ -38,6 +40,7 @@ ENV_SEL="${1:-}"
 VARIANT="${2:-all}"
 PLANNER_SEL="${3:-both}"
 FULL="${FULL:-1}"   # full faithful MPC by default; FULL=0 = validation (OOM + estimate)
+EXTRA_ARGS=("${@:4}")   # extra plan.py hydra overrides (e.g. objective.mode=all), forwarded verbatim
 
 if [ -z "$ENV_SEL" ]; then
     echo "usage: bash run_mpc.sh <env> [variant] [planner]"
@@ -228,12 +231,12 @@ for i in "${IDX[@]}"; do
             rm -rf "$rundir"
             if [ "$planner" = "gd_mpc" ]; then
                 run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
-                    planner.sub_planner.opt_steps="$GD_OPT"
+                    planner.sub_planner.opt_steps="$GD_OPT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
             else
                 run_plan "$planner" "$model" "$rundir" "$FULL_N_EVALS" "$FULL_MAX_ITER" \
                     planner.sub_planner.num_samples="$CEM_SAMPLES" \
                     planner.sub_planner.opt_steps="$CEM_OPT" \
-                    planner.sub_planner.sample_chunk_size="$CEM_CHUNK"
+                    planner.sub_planner.sample_chunk_size="$CEM_CHUNK" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
             fi
             rc=$?
             echo "  full run rc=$rc (results in $rundir/logs.json)"
