@@ -15,6 +15,13 @@
 #     env:     umaze | medium | pusht | wall
 #     variant: all (default) | False | straighten | twothirds | both
 #     planner: gd_mpc | mpc_cem | both (default)
+#   Flags (optional; the positional and env-var forms above keep working, and the
+#   flags win over the CKBPT/SEEDS env vars; they may appear anywhere):
+#     --ckpt PATH    checkpoint .pth | single run dir | dir of model run dirs
+#                    (else CKBPT, else checkpoints/test)
+#     --seeds LIST   eval seeds, space- or comma-separated (else SEEDS)
+#     -h | --help    usage
+#   bash run_mpc.sh medium both gd_mpc --ckpt /path/to/ckpt_or_dir --seeds "100 101 102"
 #   bash run_mpc.sh <env>             # full faithful MPC (default)
 #   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate
 #   SEEDS="0 1 2" bash run_mpc.sh <env>  # FULL runs: one plan.py run per seed, report mean +/- std (default: 100 101 102)
@@ -23,7 +30,8 @@
 #
 # By default CKBPT is a DIRECTORY of model run dirs and each run dir's checkpoint is
 # auto-discovered (checkpoints/<run_dir>/model_latest.pth). To run on one exact
-# checkpoint instead, point CKBPT at the checkpoint FILE:
+# checkpoint instead, point CKBPT at the checkpoint FILE (or pass --ckpt <path>; the
+# flag wins over the env var, and a relative path resolves against the repo root):
 #   CKBPT=checkpoints/win7/pointmaze/model_latest.pth bash run_mpc.sh <env> [variant] [planner]
 #
 # FULL=0 validation mode, per selected (model, planner):
@@ -41,7 +49,63 @@ export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_MODE
 PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
-CKBPT="${CKBPT:-checkpoints/test}"   # run.sh stores trained models under checkpoints/test/
+
+usage() {
+    echo "usage: bash run_mpc.sh <env> [variant] [planner] [--ckpt PATH] [--seeds \"100 101 102\"]"
+    echo "  env:     umaze | medium | pusht | wall"
+    echo "  variant: all | False | straighten | twothirds | both   (default all)"
+    echo "  planner: gd_mpc | mpc_cem | both                        (default both)"
+    echo "  --ckpt:  checkpoint .pth | single run dir | dir of run dirs   (else CKBPT, else checkpoints/test)"
+    echo "  --seeds: eval seeds, space- or comma-separated               (else SEEDS, else 100 101 102)"
+    echo "  FULL=0 runs validation instead (OOM check + time estimate; default is the full faithful MPC)"
+}
+
+# --- CLI flags (optional) ------------------------------------------------------
+# The <env> [variant] [planner] positionals and the CKBPT/SEEDS env vars keep
+# working; the flags win over the env vars and may appear anywhere in the command.
+CLI_CKPT=""
+CLI_SEEDS=""
+POS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ckpt)    [ -n "${2:-}" ] || { echo "--ckpt needs a path" >&2; exit 1; }
+                   CLI_CKPT="$2"; shift 2 ;;
+        --ckpt=*)  CLI_CKPT="${1#*=}"; shift ;;
+        --seeds)   [ -n "${2:-}" ] || { echo "--seeds needs a seeds list" >&2; exit 1; }
+                   CLI_SEEDS="$2"; shift 2 ;;
+        --seeds=*) CLI_SEEDS="${1#*=}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --)        shift; while [ $# -gt 0 ]; do POS+=("$1"); shift; done ;;
+        -*)        echo "unknown flag '$1'" >&2; usage >&2; exit 1 ;;
+        *)         POS+=("$1"); shift ;;
+    esac
+done
+ENV_SEL="${POS[0]:-}"
+VARIANT="${POS[1]:-all}"
+PLANNER_SEL="${POS[2]:-both}"
+# Extra positionals were always ignored (only <env> [variant] [planner] are read);
+# flag them so e.g. a trailing "objective.mode=all" is not mistaken for an override
+# (the objective mode is set per env via OBJ_OVERRIDES in the case block below).
+if [ "${#POS[@]}" -gt 3 ]; then
+    echo "note: ignoring extra positional args: ${POS[*]:3}" >&2
+fi
+FULL="${FULL:-1}"   # full faithful MPC by default; FULL=0 = validation (OOM + estimate)
+
+CKBPT="${CLI_CKPT:-${CKBPT:-checkpoints/test}}"   # run.sh stores trained models under checkpoints/test/
+# A bad --ckpt would otherwise be swallowed by the per-model "[skip] model not
+# available" branch below, so fail loudly on an explicitly requested path.
+if [ -n "$CLI_CKPT" ]; then
+    if [ ! -e "$CKBPT" ]; then
+        echo "--ckpt: '$CKBPT' does not exist" >&2
+        exit 1
+    elif [ -f "$CKBPT" ] && [[ "$CKBPT" != *.pth ]]; then
+        echo "--ckpt: '$CKBPT' is a file but not a .pth checkpoint" >&2
+        exit 1
+    elif [ ! -f "$CKBPT" ] && [ ! -d "$CKBPT" ]; then
+        echo "--ckpt: '$CKBPT' is neither a .pth file nor a directory" >&2
+        exit 1
+    fi
+fi
 
 # Direct-checkpoint mode: if CKBPT points at an existing checkpoint .pth file, run MPC
 # on that exact file instead of auto-discovering model run dirs inside a directory.
@@ -69,18 +133,19 @@ if [ "$DIRECT_CKBPT" = "0" ] && [ -d "$CKBPT" ]; then
     fi
 fi
 
-ENV_SEL="${1:-}"
-VARIANT="${2:-all}"
-PLANNER_SEL="${3:-both}"
-FULL="${FULL:-1}"   # full faithful MPC by default; FULL=0 = validation (OOM + estimate)
-SEEDS="${SEEDS:-100 101 102}"  # eval seeds for FULL runs: one plan.py run per seed, then mean +/- std
+# (env/variant/planner positionals were already parsed above, together with the flags)
+SEEDS="${CLI_SEEDS:-${SEEDS:-100 101 102}}"  # eval seeds for FULL runs: one plan.py run per seed, then mean +/- std
+SEEDS="${SEEDS//,/ }"   # accept "100,101,102" as well as "100 101 102"
+for _s in $SEEDS; do
+    if [[ ! "$_s" =~ ^[0-9]+$ ]]; then
+        echo "bad seed '$_s' (from --seeds/SEEDS): integers only" >&2
+        exit 1
+    fi
+done
+unset _s
 
 if [ -z "$ENV_SEL" ]; then
-    echo "usage: bash run_mpc.sh <env> [variant] [planner]"
-    echo "  env:     umaze | medium | pusht | wall"
-    echo "  variant: all | False | straighten | twothirds | both   (default all)"
-    echo "  planner: gd_mpc | mpc_cem | both                        (default both)"
-    echo "  FULL=0 runs validation instead (OOM check + time estimate; default is the full faithful MPC)"
+    usage >&2
     exit 1
 fi
 
@@ -90,7 +155,7 @@ case "$ENV_SEL" in
         ENV_NAME=point_maze
         GOAL_H=25
         # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
         MODELS=(
             "umaze_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
             "umaze_cos1e-1_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
@@ -102,7 +167,7 @@ case "$ENV_SEL" in
         ENV_NAME=point_maze_medium
         GOAL_H=25
         # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
         MODELS=(
             "medium_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-06"
             "medium_cos1e-2_agg32_projglobal_dim384_hw1_sgTrue_lr1e-06"
@@ -125,7 +190,7 @@ case "$ENV_SEL" in
         ENV_NAME=wall
         GOAL_H=25
         # mazes use the weighted intermediate-state objective (paper Sec 5.3: mode=all)
-        OBJ_OVERRIDES="objective.alpha=0 objective.mode=all"
+        OBJ_OVERRIDES="objective.alpha=0 objective.mode=last"
         MODELS=(
             "wall_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
             "wall_aggcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
@@ -283,7 +348,7 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
     fi
 }
 # --- run ----------------------------------------------------------------------
-echo "=== run_mpc.sh: env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL ==="
+echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL ==="
 if [ "$DIRECT_CKBPT" = "1" ]; then
     echo "direct-checkpoint mode: running MPC on $CKBPT"
     model="$(basename "$CKBPT")"
