@@ -155,7 +155,7 @@ esac
 echo "================================================================"
 echo " env=$ENV variant=$VARIANT encoder=$ENCODER epochs=$EPOCHS"
 echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST use_grad_checkpoint=$USE_GRAD_CHECKPOINT reg_window=$REG_WINDOW"
-echo " has_decoder=False mixed_precision=bf16  DATASET_DIR=$DATASET_DIR"
+echo " has_decoder=False mixed_precision=fp16  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
 reg_arg=()
@@ -173,7 +173,7 @@ python train.py --config-name train.yaml \
     num_hist="$NUM_HIST" \
     predictor.use_grad_checkpoint="$USE_GRAD_CHECKPOINT" \
     training.encoder_lr="$LR_USED" \
-    training.mixed_precision=bf16 \
+    training.mixed_precision=fp16 \
     has_decoder=False \
     model.train_decoder=False \
     env.num_workers=4 \
