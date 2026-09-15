@@ -11,7 +11,17 @@
 #     env:        point_maze | point_maze_medium | pusht | wall
 #     variant:    baseline | straighten | twothirds | both     (default: straighten)
 #     epochs:     optional (defaults per env: 20, pusht = 2)
-#     batch_size: optional (defaults per env: mazes 32, pusht/wall 16)
+#     batch_size: optional (defaults per env: 16 everywhere -- the 14x14 channel
+#                 attention makes the paper's batch 32 OOM even on a 16GB Kaggle GPU)
+#
+# Encoders: every env trains the SPATIAL channel projector (encoder=dino_channel =
+#   DINOv2 patch tokens -> a 14x14x8 channel map + the learned aggregation head) with
+#   the agg-mode regularizers, i.e. the paper's Table 1 best rows (with straightening,
+#   lambda=0.1 for all spatial features): UMaze 94.00% open-loop / 100.00% MPC,
+#   Medium 82.67 / 98.67, PushT 77.33 / 85.33, Wall 90.67 / 100.00. The earlier
+#   point_maze / point_maze_medium runs used the 1x384 global projector
+#   (encoder=dino_global, Table 1 rows: UMaze 38.67 / 96.00, Medium 22.67 / 78.00)
+#   and are no longer produced by this script.
 #
 # Environment variables:
 #     DATASET_DIR   (required) folder that CONTAINS the env dataset directory,
@@ -19,8 +29,10 @@
 #                   seq_lengths.pth, obses/}. If you uploaded the dataset as a
 #                   Kaggle Dataset, use DATASET_DIR=/kaggle/input/<slug>.
 #     EPOCHS        optional override for epochs (3rd positional arg wins).
-#     NUM_HIST      optional predictor context frames (default 6; conf/train.yaml
-#                   default is 3). Same knob as run.sh's NUM_HIST.
+#     NUM_HIST      optional predictor context frames (default 3 = paper Table 3
+#                   "history frames 3"; same as conf/train.yaml and as the pusht/wall
+#                   channel checkpoints already on disk). run.sh uses 3 for the mazes
+#                   too. Same knob as run.sh's NUM_HIST.
 #     USE_GRAD_CHECKPOINT optional 'true' to gradient-checkpoint the predictor
 #                   Transformer (memory <-> compute; default false = exact prior numerics).
 #     REG_WINDOW    optional P-Reg stats window in frames (reg_window; default =
@@ -62,19 +74,20 @@ export WANDB_MODE=offline
 # --- per-env paper defaults (encoder, regularizer strings, batch, epochs) --
 case "$ENV" in
     point_maze)
-        ENCODER=dino_global
-        STRAIGHTEN="cos1e-1"
-        TWOTHIRDS="twothirds1e-2"
-        BATCH=32
+        ENCODER=dino_channel     # paper Table 1 best row: DINOv2(patch)+proj 14x14x8
+        STRAIGHTEN="aggcos1e-1"  # spatial features: lambda=0.1 (Table 1 caption)
+        TWOTHIRDS="aggtwothirds5e-2"
+        BATCH=16                 # 14x14 channel attention; 32 OOMs a 16GB GPU
         DEF_EPOCHS=20
         LR=1e-5
-        LR_BASELINE=1e-5
+        LR_BASELINE=1e-6         # Table 3 footnote: no-straightening lr=1e-6
         ;;
     point_maze_medium)
-        ENCODER=dino_global
-        STRAIGHTEN="cos1e-2"     # paper Table 1 dagger: lambda=0.01 for Medium
-        TWOTHIRDS="twothirds5e-2"
-        BATCH=32
+        ENCODER=dino_channel     # paper Table 1 best row: DINOv2(patch)+proj 14x14x8
+        STRAIGHTEN="aggcos1e-1"  # spatial features: lambda=0.1 (Table 1 caption); the
+                                 # old cos1e-2 dagger applied to the 1x384 global row
+        TWOTHIRDS="aggtwothirds5e-2"
+        BATCH=16                 # 14x14 channel attention; 32 OOMs a 16GB GPU
         DEF_EPOCHS=20
         LR=1e-5
         LR_BASELINE=1e-6         # Table 3 footnote: baseline medium lr=1e-6
@@ -165,4 +178,9 @@ python train.py --config-name train.yaml \
     model.train_decoder=False \
     env.num_workers=4 \
     "${reg_arg[@]}" \
+    # NOTE: this dir name only encodes env+variant, not the encoder/projector, so a
+    # point_maze(medium) run now lands in the same checkpoints/<env>_<variant> folder that
+    # the legacy 1x384 global-projector run used. On a fresh Kaggle session that is the
+    # narrowest change; if you resume an old session's working dir, delete
+    # checkpoints/point_maze* there first so the channel runs do not mix with the old ones.
     hydra.run.dir="checkpoints/${ENV}_${VARIANT}"
