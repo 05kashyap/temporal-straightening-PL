@@ -11,7 +11,13 @@
 #   Step 7: train a world model WITH both straightening and two-thirds
 #   Step 8: evaluate it via planning (plan.py: GD + CEM)
 #
-# ENV=point_maze: PointMaze (umaze) task.
+# ENV=point_maze: PointMaze (umaze) task with the SPATIAL channel projector
+#   (encoder=dino_channel, 14x14x8 + the learned aggregation head) -- the paper's
+#   Table 1 best row (94.00% open-loop GD / 100.00% MPC with straightening) vs the
+#   1-token global projector row (38.67% / 96.00%). Regularizers act on the
+#   aggregation head (straighten aggcos1e-1, twothirds aggtwothirds5e-2); 20 epochs
+#   (maze protocol), batch 16 and num_hist 3 (paper Table 3; the 14x14 attention is
+#   heavy). The legacy umaze_*_projglobal_dim384_hw1_* dirs are the old global runs.
 # ENV=pusht (default): PushT task, same 4-variant experiment, but with the SPATIAL
 #   channel projector (encoder=dino_channel, 14x14x8) -- the paper reports ~2%
 #   open-loop GD success on PushT with the 1-token global projector (dino_global)
@@ -19,10 +25,17 @@
 #   there (aggcos1e-1 / aggtwothirds5e-2). The paper trains PushT for only 2 epochs
 #   (Appendix A.3); planning adds objective.alpha=1 per the README and uses
 #   reduced n_evals / num_samples because the 14x14 attention is heavier.
-# ENV=point_maze_medium: PointMaze (D4RL maze2d medium), same channel-projector setup
-#   as pusht/wall -- encoder=dino_channel (14x14x8) + the learned aggregation head, so
-#   the regularizers act on the aggregated features (straighten aggcos1e-1, twothirds
-#   aggtwothirds5e-2). This is the paper's main config (Table 1: 82.67% open-loop /
+# ENV=point_maze_medium: PointMaze (D4RL maze2d medium) with the SAME channel projector
+#   as pusht/wall (encoder=dino_channel, 14x14x8) but -- unlike every other env in this
+#   repo -- WITHOUT the learned aggregation head: the paper (Sec. B.6) uses
+#   "[agg] for all environments except medium maze, [flatten] for medium maze", so this
+#   case passes encoder.agg_type=flatten (the 196 patch tokens are pooled by flattening
+#   to 1568 dims). The regularizer strings keep their agg* prefix, which selects
+#   "straighten the POOLED features" -- for Medium those pooled features are that flatten,
+#   i.e. the paper's Medium rule C_t = cos(vec(v_t), vec(v_t+1)) (straighten aggcos1e-1,
+#   twothirds aggtwothirds5e-2); lambda stays 1e-1 because Table 1's caption says "All
+#   spatial features use lambda=0.1" (the 0.01 in Sec. B.6 belongs to the Fig. 14
+#   aggregation ablation). This is the paper's main config (Table 1: 82.67% open-loop /
 #   98.67% MPC with straightening) vs the 1-token global-projector row (22.67% /
 #   78.00%). 20 epochs (maze protocol); batch 16 (the 14x14 attention is heavy).
 # ENV=wall: Wall task, same channel-projector setup (paper App. A.1: 1920 trajs x
@@ -48,6 +61,7 @@
 #
 # Usage:
 #   bash run.sh                  # run the full pipeline (resumes existing runs)
+#   ENV=point_maze bash run.sh   # PointMaze-UMaze (dino_channel 14x14x8 + agg head, straighten aggcos1e-1, twothirds aggtwothirds5e-2; batch 16, num_hist 3)
 #   ENV=wall bash run.sh         # same experiment on Wall (dino_channel + aggcos, dset goals + alpha=0 per paper 5.3)
 #   ENV=point_maze_medium bash run.sh  # PointMaze-Medium (dino_channel 14x14x8 + agg head, straighten aggcos1e-1, twothirds aggtwothirds5e-2; batch 16)
 #   ENV=granular bash run.sh     # DINO-WM deformable protocol on Granular (fs=1, 100 epochs; MPC planning needs PyFleX)
@@ -56,7 +70,8 @@
 #   BATCH_SIZE=8 bash run.sh      # smaller batch if memory is ever tight
 #   N_EVALS=10 bash run.sh       # fewer eval episodes for faster planning
 #   TRAIN_DECODER=True bash run.sh  # also train the VQVAE decoder (required for planner videos)
-#   NUM_HIST=4 bash run.sh       # predictor context frames (default 6; conf/train.yaml default is 3)
+#   NUM_HIST=4 bash run.sh       # predictor context frames (default 3 for point_maze/point_maze_medium = paper
+#                                # Table 3; 6 for wall/granular/rope; conf/train.yaml default is 3)
 #   USE_GRAD_CHECKPOINT=true bash run.sh  # gradient-checkpoint the predictor Transformer (memory <-> compute; default false = exact prior numerics)
 #   REG_WINDOW=7 bash run.sh    # P-Reg stats window of 7 frames (default = num_hist+num_pred). Can EXCEED
 #                               # num_hist+num_pred: the dataloader then feeds 7 frames/sample while the
@@ -82,15 +97,19 @@ ENV="${ENV:-point_maze_medium}"     # task: point_maze | pusht | wall (default) 
 
 # Per-task defaults (BATCH_SIZE/STRAIGHTEN/TWOTHIRDS/EPOCHS/N_EVALS/NUM_SAMPLES
 # are set per task below; explicit env overrides always win).
-#  - point_maze uses encoder=dino_global (1 global token) + cos-mode regularizers;
-#    20 epochs is the paper protocol for the mazes.
-#  - pusht, wall and point_maze_medium use encoder=dino_channel (14x14x8 spatial
+#  - point_maze (umaze) uses the same channel-projector setup as pusht/wall/medium
+#    (encoder=dino_channel, 14x14x8 + agg head -> aggcos1e-1 / aggtwothirds5e-2), the
+#    paper's Table 1 best row (94.00% open-loop / 100.00% MPC vs 38.67 / 96.00 for the
+#    1x384 global projector). 20 epochs is the paper protocol for the mazes and
+#    num_hist=3 (DEF_NUM_HIST below) matches paper Table 3; the 14x14 attention is
+#    heavier, so batch 16 and CHUNK_SIZE=10 as for pusht/wall/medium.
+#  - pusht, wall, point_maze and point_maze_medium use encoder=dino_channel (14x14x8 spatial
 #    features + the learned aggregation head): the paper's Table 1 shows only ~2%
 #    open-loop GD success on PushT with the 1-token global projector vs ~70% with the
-#    channel projector (wall 80% -> 90.67%, medium 22.67% -> 82.67% with
-#    straightening). Regularizers act on the aggregation head (aggcos1e-1 /
-#    aggtwothirds5e-2). Pusht trains 2 epochs (paper A.3); wall and medium 20
-#    (paper A.1 / the maze protocol). The 14x14 attention is heavy: all three train at
+#    channel projector (wall 80% -> 90.67%, umaze 38.67% -> 94.00%, medium 22.67% ->
+#    82.67% with straightening). Regularizers act on the aggregation head (aggcos1e-1 /
+#    aggtwothirds5e-2). Pusht trains 2 epochs (paper A.3); wall, umaze and medium 20
+#    (paper A.1 / the maze protocol). The 14x14 attention is heavy: all four train at
 #    batch 16 (32 OOMs), and planning runs 50 evals in chunks of 10 to stay within
 #    memory. CEM uses the paper's num_samples=200, rolled out in chunks of 50
 #    (CEM_SAMPLE_CHUNK_SIZE) to fit the same GPU.
@@ -108,6 +127,7 @@ case "$ENV" in
         NUM_SAMPLES="${NUM_SAMPLES:-200}"  # paper's CEM candidates per traj (was 50)
         CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (identical result, fits the 12 GB GPU)
         CHUNK_SIZE="${CHUNK_SIZE:-10}"  # plan/eval episodes in chunks of this size to bound memory
+        DEF_NUM_HIST="${DEF_NUM_HIST:-3}"  # unchanged here; pass NUM_HIST=3 to match paper Table 3 (what the existing pusht channel ckpt used)
         ;;
     wall)
         BATCH_SIZE="${BATCH_SIZE:-16}"  # paper default 32 OOMs the 12 GB GPU (dino_channel 14x14 attention); 16 fits, 8 is the safe fallback
@@ -118,6 +138,7 @@ case "$ENV" in
         NUM_SAMPLES="${NUM_SAMPLES:-200}"  # paper's CEM candidates per traj (was 50)
         CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (identical result, fits the 12 GB GPU)
         CHUNK_SIZE="${CHUNK_SIZE:-10}"  # plan/eval episodes in chunks of this size to bound memory
+        DEF_NUM_HIST="${DEF_NUM_HIST:-3}"  # unchanged here; pass NUM_HIST=3 to match paper Table 3 (what the existing wall channel ckpt used)
         ;;
     granular|rope)
         # DINO-WM deformable protocol (App. Tables 11/12): 1000 x 20-step
@@ -143,6 +164,7 @@ case "$ENV" in
                                         # on this 12 GB GPU (CEM eval_every=1 runs a real-sim eval per
                                         # opt step); re-enable with PLANNERS="gd_mpc mpc_cem"
         GOAL_H="${GOAL_H:-19}"    # 20-frame episodes: dset goal = final frame of a val trajectory
+        DEF_NUM_HIST="${DEF_NUM_HIST:-3}"  # unchanged: the reg losses need >=3 latent frames per window
         ;;
     point_maze_medium)
         # PointMaze-Medium (D4RL maze2d medium): same channel-projector setup as
@@ -161,35 +183,55 @@ case "$ENV" in
         NUM_SAMPLES="${NUM_SAMPLES:-200}" # CEM candidates per traj (config default)
         CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (fits the GPU)
         CHUNK_SIZE="${CHUNK_SIZE:-10}"   # plan/eval episodes in chunks of 10 to bound memory (14x14 attention, same as pusht/wall)
+        DEF_NUM_HIST="${DEF_NUM_HIST:-3}"  # paper Table 3: history frames 3 (matches the pusht/wall channel ckpts)
         ;;
-    *)
-        # point_maze
-        BATCH_SIZE="${BATCH_SIZE:-32}"   # config default; fits this GPU with decoder off + dino_global (3-token attention)
-        STRAIGHTEN="${STRAIGHTEN:-cos1e-1}"  # README: cos1e-1 = patch-wise curvature regularization
-        TWOTHIRDS="${TWOTHIRDS:-twothirds5e-2}"  # two-thirds: twothirds5e-2 (cos) or aggtwothirds5e-2 (aggcos)
+    point_maze)
+        # Paper Table 1 best row: DINOv2(patch)+proj 14x14x8 + Lcurv (94.00% open-loop /
+        # 100.00% MPC) vs the 1x384 global projector (38.67% / 96.00%). Same
+        # channel-projector setup as pusht/wall/medium, so the regularizers act on the
+        # aggregation head (aggcos1e-1 / aggtwothirds5e-2). num_hist=3 (DEF_NUM_HIST)
+        # matches paper Table 3 ("history frames 3").
+        BATCH_SIZE="${BATCH_SIZE:-16}"   # 14x14 attention: batch 32 OOMs (same as pusht/wall); 16 fits, 8 is the safe fallback
+        STRAIGHTEN="${STRAIGHTEN:-aggcos1e-1}"     # curvature on the learned aggregation head (lambda=0.1)
+        TWOTHIRDS="${TWOTHIRDS:-aggtwothirds5e-2}" # two-thirds: aggtwothirds5e-2 (aggcos) or twothirds5e-2 (cos)
         EPOCHS="${EPOCHS:-20}"
         N_EVALS="${N_EVALS:-50}"         # eval episodes (config default)
         NUM_SAMPLES="${NUM_SAMPLES:-200}" # CEM candidates per traj (config default)
-        CHUNK_SIZE="${CHUNK_SIZE:-}"     # empty = evaluate all n_evals at once (fits for dino_global)
+        CEM_SAMPLE_CHUNK_SIZE="${CEM_SAMPLE_CHUNK_SIZE:-50}"  # roll the 200 candidates out in chunks of 50 (fits the GPU)
+        CHUNK_SIZE="${CHUNK_SIZE:-10}"   # plan/eval episodes in chunks of 10 to bound memory (14x14 attention, same as pusht/wall)
+        DEF_NUM_HIST="${DEF_NUM_HIST:-3}"  # paper Table 3: history frames 3 (matches the pusht/wall channel ckpts)
+        ;;
+    *)
+        echo "Unknown ENV='$ENV' (choose point_maze, point_maze_medium, pusht, wall, granular or rope)" >&2
+        exit 1
         ;;
 esac
-# Encoder must have a trainable projector (dino_global / dino_channel) for the regularizers to
+# Encoder must have a trainable projector (dino_channel / dino_global) for the regularizers to
 # have a training effect; encoder=dino (no projector) makes straighten/twothirds inert.
-# The RUN_* dir names below encode the encoder/projector: projglobal_dim384_hw1 for
-# point_maze (umaze, encoder=dino_global) and projchannel_dim8_hw14 for pusht, wall,
-# granular/rope and point_maze_medium (encoder=dino_channel, 14x14x8).
+# The RUN_* dir names below encode the encoder/projector: projchannel_dim8_hw14 for
+# point_maze (umaze), point_maze_medium, pusht, wall and granular/rope
+# (encoder=dino_channel, 14x14x8 + the aggregation head). The legacy
+# {umaze,medium}_*_projglobal_dim384_hw1_* dirs are the older 1-token global-projector
+# runs (paper Table 1's 1x384 rows); this script no longer produces them and they are
+# left untouched on disk.
 PLANNERS="${PLANNERS:-gd cem}"   # planners with configs in conf/plan_*.yaml
 GOAL_H="${GOAL_H:-25}"           # keep divisible by frameskip (5)
 TRAIN_DECODER="${TRAIN_DECODER:-False}"  # also train the VQVAE decoder (required for planner videos)
 FRESH="${FRESH:-0}" # 1 = fresh
-NUM_HIST="${NUM_HIST:-6}"   # predictor context frames (conf/train.yaml default is 3); training only
+# Context frames: DEF_NUM_HIST from the per-env case above -- 3 for point_maze and
+# point_maze_medium (paper Table 3 "history frames 3"; the pusht/wall channel checkpoints
+# were trained at 3 as well), 6 for wall/granular/rope (unchanged). An explicit NUM_HIST=
+# still wins; conf/train.yaml's default is 3.
+NUM_HIST="${NUM_HIST:-$DEF_NUM_HIST}"
 USE_GRAD_CHECKPOINT="${USE_GRAD_CHECKPOINT:-false}"  # gradient-checkpoint the predictor Transformer (memory <-> compute); default off = exact prior numerics
 REG_WINDOW="${REG_WINDOW:-}"  # P-Reg stats window in frames (reg_window); empty = num_hist+num_pred. Larger than that grows the dataloader window (predictor context stays num_hist).
 
 CKBPT="./checkpoints"
 
 # ---- per-task setup ----------------------------------------------------------
-#  - point_maze: the original experiment (env=point_maze, encoder=dino_global).
+#  - point_maze: env=point_maze with the SPATIAL channel projector (encoder=dino_channel,
+#                14x14x8 + agg head) -- the paper's Table 1 best umaze row; planning uses
+#                the plan_gd/plan_cem defaults (dset goals, alpha=0), no overrides.
 #  - pusht:      env=pusht with the SPATIAL channel projector (encoder=dino_channel,
 #                14x14x8) -- see the knobs comment for why. Regularizers use the
 #                aggcos modes; planning adds objective.alpha=1 (README's PushT note).
@@ -198,24 +240,39 @@ CKBPT="./checkpoints"
 #                (the plan defaults; see the comment in the wall case below).
 case "$ENV" in
     point_maze)
-        TRAIN_TASK_OVERRIDES="env=point_maze encoder=dino_global"
+        # Paper Table 1 best row (same setup as pusht/wall/medium): 14x14x8 spatial
+        # features + the learned aggregation head, so the regularizers act on the
+        # aggregated features (aggcos1e-1 / aggtwothirds5e-2). encoder_lr: 1e-6 for the
+        # baseline (no straightening), 1e-5 for the regularized variants (Table 3
+        # footnote); num_hist=3 (DEF_NUM_HIST) = paper Table 3.
+        TRAIN_TASK_OVERRIDES="env=point_maze encoder=dino_channel"
         PLAN_TASK_OVERRIDES=""
-        RUN_FALSE="test/umaze_False_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_TRUE="test/umaze_${STRAIGHTEN}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_TWOTHIRDS="test/umaze_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
-        RUN_BOTH="test/umaze_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05"
+        RUN_FALSE="test/umaze_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06"
+        RUN_TRUE="test/umaze_${STRAIGHTEN}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TWOTHIRDS="test/umaze_tt${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_BOTH="test/umaze_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         ;;
     point_maze_medium)
-        # Same channel-projector setup as pusht/wall (the paper's main Table 1 row):
-        # 14x14x8 spatial features + the learned aggregation head, so the regularizers
-        # act on the aggregated features. encoder_lr: 1e-6 for the baseline (no
-        # straightening), 1e-5 for the regularized variants (Table 3 footnote).
-        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_channel"
+        # Paper Sec. B.6: Medium is the only env whose Table 1 row pools with [flatten]
+        # instead of the learned aggregation head, hence encoder.agg_type=flatten below.
+        # The regularizer strings keep their agg* prefix because they act on the POOLED
+        # features -- for Medium that pooling is the flatten (the paper's Medium rule is
+        # C_t = cos(vec(v_t), vec(v_t+1)) at lambda=0.1: Table 1's caption "All spatial
+        # features use lambda=0.1"). encoder_lr: 1e-6 for the baseline (no straightening),
+        # 1e-5 for the regularized variants (Table 3 footnote).
+        # The run-dir names follow run.sh's <env>_<straighten>_tt<twothirds>_agg32_...
+        # convention, with the flatten head tagged exactly like conf/train.yaml's
+        # hydra.run.dir template does it (the "agg" in a loss string becomes "aggflatten"),
+        # so a medium run can never be confused with / resume from a head-MLP run. A
+        # baseline name has no loss string to tag (same residual gap as the template), and
+        # this case is the only medium trainer in the repo, so no head-MLP medium run can
+        # appear by accident.
+        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_channel encoder.agg_type=flatten"
         PLAN_TASK_OVERRIDES=""
         RUN_FALSE="test/medium_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06"
-        RUN_TRUE="test/medium_${STRAIGHTEN}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
-        RUN_TWOTHIRDS="test/medium_tt${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
-        RUN_BOTH="test/medium_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TRUE="test/medium_${STRAIGHTEN//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TWOTHIRDS="test/medium_tt${TWOTHIRDS//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_BOTH="test/medium_${STRAIGHTEN//agg/aggflatten}_tt${TWOTHIRDS//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         ;;
     pusht)
         TRAIN_TASK_OVERRIDES="env=pusht encoder=dino_channel"

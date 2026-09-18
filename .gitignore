@@ -7,3 +7,6 @@ wandb
 checkpoints
 *.slurm
 # *.sh
+Old results
+results
+papers

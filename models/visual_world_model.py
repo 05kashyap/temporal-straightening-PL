@@ -105,6 +105,14 @@ class VWorldModel(nn.Module):
             )
         else:
             log.info("Straightening disabled")
+        if self.twothirds:
+            log.info(
+                "Two-thirds enabled: mode=%s, scale=%s",
+                self.twothirds_mode,
+                self.twothirds_scale,
+            )
+        else:
+            log.info("Two-thirds disabled")
         log.info("Stop-grad enabled: %s", self.stop_grad)
         log.info(
             "VCReg enabled: %s, apply_to=enc, std_coeff=%s, cov_coeff=%s",

@@ -23,6 +23,18 @@
 #   (encoder=dino_global, Table 1 rows: UMaze 38.67 / 96.00, Medium 22.67 / 78.00)
 #   and are no longer produced by this script.
 #
+#   PointMaze-Medium is the ONE env whose Table 1 row does not use the learned
+#   aggregation head: the paper (Sec. B.6) uses "[agg] for all environments except
+#   medium maze, [flatten] for medium maze", so this script passes
+#   encoder.agg_type=flatten for point_maze_medium (the 196 patch tokens are pooled by
+#   flattening to 1568 dims instead of the MLP head; the projector is unchanged).
+#   The loss strings keep their agg* prefix (aggcos1e-1 / aggtwothirds5e-2) because they
+#   are applied to the *pooled* features, which for Medium is that flatten -- i.e. the
+#   paper's C_t = cos(vec(v_t), vec(v_t+1)) rule for Medium. Note that lambda stays 1e-1:
+#   Table 1's caption (paper p.7) states "All spatial features use lambda=0.1"; the
+#   "lambda=0.01 for the rest" sentence in Sec. B.6 belongs to the Fig. 14 aggregation
+#   ablation, not to Table 1.
+#
 # Environment variables:
 #     DATASET_DIR   (required) folder that CONTAINS the env dataset directory,
 #                   e.g. $DATASET_DIR/point_maze/{states.pth, actions.pth,
@@ -46,8 +58,15 @@
 #     (conf/train.yaml defaults to bf16).
 #   - has_decoder=False => decoder-less training (the paper/OL_RESULTS setup);
 #     it also skips the VQVAE, so no distributed_fn/vqvae deps are needed.
-#   - Checkpoints land in ./checkpoints/<env>_<variant>/ under /kaggle/working;
-#     download them before the session ends (Kaggle /kaggle/working is wiped).
+#   - Checkpoints land in ./checkpoints/test/<save_name>_<straighten>_<twothirds>_agg32_
+#     projchannel_dim8_hw14_sgTrue_lr<encoder_lr>/ (the same field order as
+#     conf/train.yaml's hydra.run.dir template and EXPERIMENT.md), so the four variants
+#     of an env get four DISTINCT dirs instead of colliding in checkpoints/<env>_<variant>.
+#     Examples: point_maze both ->
+#       checkpoints/test/umaze_aggmlpcos1e-1_aggmlptwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+#     point_maze_medium straighten (flatten head) ->
+#       checkpoints/test/medium_aggflattencos1e-1_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+#     Download them before the session ends (Kaggle /kaggle/working is wiped).
 #   - WANDB_MODE=offline is set; results are stored locally, no API key needed.
 # =============================================================================
 set -euo pipefail
@@ -75,6 +94,8 @@ export WANDB_MODE=offline
 case "$ENV" in
     point_maze)
         ENCODER=dino_channel     # paper Table 1 best row: DINOv2(patch)+proj 14x14x8
+        SAVE_NAME=umaze          # checkpoint dir prefix (EXPERIMENT.md/run.sh convention)
+        AGG_OVERRIDE=""          # keep the learned aggregation head (paper [agg])
         STRAIGHTEN="aggcos1e-1"  # spatial features: lambda=0.1 (Table 1 caption)
         TWOTHIRDS="aggtwothirds5e-2"
         BATCH=16                 # 14x14 channel attention; 32 OOMs a 16GB GPU
@@ -84,6 +105,9 @@ case "$ENV" in
         ;;
     point_maze_medium)
         ENCODER=dino_channel     # paper Table 1 best row: DINOv2(patch)+proj 14x14x8
+        SAVE_NAME=medium         # checkpoint dir prefix (EXPERIMENT.md/run.sh convention)
+        AGG_OVERRIDE="encoder.agg_type=flatten"  # paper Sec. B.6: Medium uses [flatten],
+                                 # i.e. NOT the MLP head that umaze/pusht/wall use
         STRAIGHTEN="aggcos1e-1"  # spatial features: lambda=0.1 (Table 1 caption); the
                                  # old cos1e-2 dagger applied to the 1x384 global row
         TWOTHIRDS="aggtwothirds5e-2"
@@ -94,6 +118,8 @@ case "$ENV" in
         ;;
     pusht)
         ENCODER=dino_channel
+        SAVE_NAME=pusht          # checkpoint dir prefix (EXPERIMENT.md/run.sh convention)
+        AGG_OVERRIDE=""          # keep the learned aggregation head (paper [agg])
         STRAIGHTEN="aggcos1e-1"
         TWOTHIRDS="aggtwothirds5e-2"
         BATCH=16                 # 14x14 channel attention; 32 OOMs a 16GB GPU
@@ -103,6 +129,8 @@ case "$ENV" in
         ;;
     wall)
         ENCODER=dino_channel
+        SAVE_NAME=wall           # checkpoint dir prefix (EXPERIMENT.md/run.sh convention)
+        AGG_OVERRIDE=""          # keep the learned aggregation head (paper [agg])
         STRAIGHTEN="aggcos1e-1"
         TWOTHIRDS="aggtwothirds5e-2"
         BATCH=16
@@ -155,6 +183,7 @@ esac
 echo "================================================================"
 echo " env=$ENV variant=$VARIANT encoder=$ENCODER epochs=$EPOCHS"
 echo " straighten=$S_VAL twothirds=$T_VAL encoder_lr=$LR_USED batch=$BATCH num_hist=$NUM_HIST use_grad_checkpoint=$USE_GRAD_CHECKPOINT reg_window=$REG_WINDOW"
+echo " agg_override=${AGG_OVERRIDE:-<none>}"
 echo " has_decoder=False mixed_precision=fp16  DATASET_DIR=$DATASET_DIR"
 echo "================================================================"
 
@@ -162,6 +191,30 @@ reg_arg=()
 if [ -n "$REG_WINDOW" ]; then
     reg_arg=(reg_window="$REG_WINDOW")
 fi
+
+# Extra Hydra override selecting the encoder's aggregation rule (empty => keep the config
+# default). Only point_maze_medium sets it (encoder.agg_type=flatten, paper Sec. B.6).
+agg_arg=()
+if [ -n "$AGG_OVERRIDE" ]; then
+    agg_arg=("$AGG_OVERRIDE")
+fi
+
+# Pin the run dir explicitly instead of relying on conf/train.yaml's hydra.run.dir
+# template:
+#   <save_name>_<straighten>_<twothirds>_agg32_projchannel_dim8_hw14_sgTrue_lr<encoder_lr>
+# Every field that changes the trained model is in the name, so baseline / straighten /
+# twothirds / both of one env can never resume from each other's last.ckpt (train.py
+# resumes from <run.dir>/<model_name>/last.ckpt whenever that file exists).
+# NOTE for old Kaggle sessions: earlier versions of this script put
+# hydra.run.dir="checkpoints/${ENV}_${VARIANT}" AFTER a comment line, i.e. the override was
+# never part of the python command (bash ended the command at the comment and then tried
+# to *run* the override line) -- so every variant shared checkpoints/<env>_<variant> and the
+# script died with exit 127. Delete such stale folders before re-running there.
+# LR_TAG: render 1e-5 as "1e-05" so the folder name matches conf/train.yaml's own
+# rendering of training.encoder_lr (and run.sh's checkpoints/test/*_lr1e-05 dirs).
+LR_TAG=$(printf '%.0e' "$LR_USED")
+RUN_DIR="checkpoints/test/${SAVE_NAME}_${S_VAL}_${T_VAL}_agg32_projchannel_dim8_hw14_sgTrue_lr${LR_TAG}"
+echo " run dir: $RUN_DIR"
 
 python train.py --config-name train.yaml \
     env="$ENV" \
@@ -177,10 +230,6 @@ python train.py --config-name train.yaml \
     has_decoder=False \
     model.train_decoder=False \
     env.num_workers=4 \
+    "${agg_arg[@]}" \
     "${reg_arg[@]}" \
-    # NOTE: this dir name only encodes env+variant, not the encoder/projector, so a
-    # point_maze(medium) run now lands in the same checkpoints/<env>_<variant> folder that
-    # the legacy 1x384 global-projector run used. On a fresh Kaggle session that is the
-    # narrowest change; if you resume an old session's working dir, delete
-    # checkpoints/point_maze* there first so the channel runs do not mix with the old ones.
-    hydra.run.dir="checkpoints/${ENV}_${VARIANT}"
+    hydra.run.dir="$RUN_DIR"

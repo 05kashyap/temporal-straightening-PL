@@ -2,13 +2,22 @@
 # =============================================================================
 # run_mpc.sh -- faithful closed-loop MPC on the trained models. Default: run
 #              the complete faithful MPC; FULL=0 switches to a quick validation
-#              mode (OOM check + full-run time estimate).
+#              mode (OOM check + full-run time estimate); OL=1 switches to the
+#              true OPEN-LOOP plan (one plan for the whole goal horizon).
 #
 # Faithful MPC = the paper's closed-loop MPC (temporal-straightening, Table 4/5):
 #   n_taken_actions=5, GD opt_steps=100 (Adam, lr 0.1, zero init); CEM
 #   num_samples=300, opt_steps=30 (plan_mpc_cem.yaml defaults; the paper's CEM
 #   is open-loop only). max_iter is capped at 20 -- the MPC loop exits early
 #   on success, so the cap is only a safety bound.
+#
+# Open loop (OL=1) = the paper's open-loop planning row: conf/plan_gd.yaml /
+#   conf/plan_cem.yaml, i.e. max_iter=1 with n_taken_actions=goal_H (25), so the
+#   sub-planner looks 5 model steps (= goal_H/frameskip) ahead, plans once, and
+#   the whole action sequence is executed in the real sim with no feedback and
+#   no re-planning. Results go to plan_outputs_gd_ol/ and plan_outputs_cem_ol/
+#   so the closed-loop logs in plan_outputs_gd_mpc/ + plan_outputs_mpc_cem/ (and
+#   the OL_RESULTS.md tables derived from them) are never overwritten.
 #
 # Usage:
 #   bash run_mpc.sh <env> [variant] [planner]
@@ -24,9 +33,19 @@
 #   bash run_mpc.sh medium both gd_mpc --ckpt /path/to/ckpt_or_dir --seeds "100 101 102"
 #   bash run_mpc.sh <env>             # full faithful MPC (default)
 #   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate
+#   OL=1 bash run_mpc.sh <env> all both   # OPEN LOOP: one plan per episode for the whole goal_H
 #   SEEDS="0 1 2" bash run_mpc.sh <env>  # FULL runs: one plan.py run per seed, report mean +/- std (default: 100 101 102)
 #   For every (model, planner), the multi-seed mean +/- std (and per-seed values for
 #   all final_eval metrics) is persisted to plan_outputs_<planner>/summaries/<model>_gH<goal_H>.json.
+#
+# OL=1 open-loop mode (per env/model/seed): plan once with max_iter=1 and
+#   n_taken_actions=goal_H, save to plan_outputs_gd_ol/<model>_s<seed>_gH<goal_H>
+#   (GD) or plan_outputs_cem_ol/... (CEM), then aggregate with
+#   aggregate_mpc_summary.py gd_ol|cem_ol <model> <goal_H> <seeds...>.
+#   Budgets default to the same sub-planner budget as the closed-loop runs
+#   (GD opt_steps=100; CEM num_samples=300, opt_steps=30) so the OPEN vs CLOSED
+#   gap is purely "feedback vs no feedback"; override with OL_GD_OPT /
+#   OL_CEM_SAMPLES / OL_CEM_OPT / OL_CEM_CHUNK / OL_N_EVALS / OL_CHUNK.
 #
 # By default CKBPT is a DIRECTORY of model run dirs and each run dir's checkpoint is
 # auto-discovered (checkpoints/<run_dir>/model_latest.pth). To run on one exact
@@ -58,6 +77,7 @@ usage() {
     echo "  --ckpt:  checkpoint .pth | single run dir | dir of run dirs   (else CKBPT, else checkpoints/test)"
     echo "  --seeds: eval seeds, space- or comma-separated               (else SEEDS, else 100 101 102)"
     echo "  FULL=0 runs validation instead (OOM check + time estimate; default is the full faithful MPC)"
+    echo "  OL=1   runs OPEN LOOP instead (max_iter=1, n_taken_actions=goal_H; outputs in plan_outputs_{gd,cem}_ol/)"
 }
 
 # --- CLI flags (optional) ------------------------------------------------------
@@ -90,6 +110,7 @@ if [ "${#POS[@]}" -gt 3 ]; then
     echo "note: ignoring extra positional args: ${POS[*]:3}" >&2
 fi
 FULL="${FULL:-1}"   # full faithful MPC by default; FULL=0 = validation (OOM + estimate)
+OL="${OL:-0}"       # OL=1 = true open loop (one plan for the whole goal_H); wins over FULL
 
 CKBPT="${CLI_CKPT:-${CKBPT:-checkpoints/test}}"   # run.sh stores trained models under checkpoints/test/
 # A bad --ckpt would otherwise be swallowed by the per-model "[skip] model not
@@ -234,9 +255,9 @@ esac
 FULL_N_EVALS=50
 FULL_MAX_ITER=20        # safety cap; the loop exits on success (~5 iters for a 25-step goal)
 GD_OPT=100              # paper Table 4
-CEM_SAMPLES=300         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
-CEM_OPT=30              # plan_mpc_cem.yaml default
-CEM_CHUNK=50            # roll the 300 CEM samples in chunks of 50 (12 GB GPU)
+CEM_SAMPLES=200         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
+CEM_OPT=10              # plan_mpc_cem.yaml default
+CEM_CHUNK=50            # roll the 200 CEM samples in chunks of 50 (12 GB GPU)
 
 S_N_EVALS=1
 S_MAX_ITER=1
@@ -245,6 +266,16 @@ S_GD_OPT=3
 S_CEM_SAMPLES=8
 S_CEM_OPT=2
 S_CEM_CHUNK=8
+
+# --- open-loop budgets (OL=1) ------------------------------------------------
+# Same sub-planner budget as the closed-loop runs so OPEN vs CLOSED differs only
+# in whether the plan is re-planned from env feedback; override via the env vars.
+OL_N_EVALS="${OL_N_EVALS:-50}"
+OL_CHUNK="${OL_CHUNK:-1}"                 # episodes per plan() call (1 = one episode per plan)
+OL_GD_OPT="${OL_GD_OPT:-$GD_OPT}"
+OL_CEM_SAMPLES="${OL_CEM_SAMPLES:-300}"   # plan_mpc_cem.yaml default
+OL_CEM_OPT="${OL_CEM_OPT:-30}"            # plan_mpc_cem.yaml default
+OL_CEM_CHUNK="${OL_CEM_CHUNK:-$CEM_CHUNK}"
 
 # 5 env actions per MPC iteration for these fs=5 envs (n_taken_actions=5 -> /frameskip)
 ITERS_HORIZON=$(( GOAL_H / 5 ))
@@ -288,13 +319,16 @@ ckpt_full() {  # $1 = model run dir name (unused in direct-checkpoint mode)
 
 run_plan() {  # $1 planner, $2 model, $3 run.dir, $4 n_evals, $5 max_iter, $6... extra args
     local planner="$1" model="$2" rundir="$3" n_evals="$4" max_iter="$5"; shift 5
-    local cfg="plan_${planner}.yaml"
+    # RUN_CFG lets OL=1 swap plan_gd_mpc.yaml/plan_mpc_cem.yaml for the open-loop
+    # configs (plan_gd.yaml/plan_cem.yaml); chunk_size is RUN_CHUNK (default S_CHUNK).
+    local cfg="${RUN_CFG:-plan_${planner}.yaml}"
+    local chunk="${RUN_CHUNK:-$S_CHUNK}"
     mkdir -p "$(dirname "$rundir")"
     "$PY" plan.py --config-name "$cfg" \
         ckpt_base_path="$(ckpt_full "$model")" model_name="$model" \
         hydra.run.dir="$rundir" \
         goal_H="$GOAL_H" n_evals="$n_evals" \
-        planner.max_iter="$max_iter" chunk_size="$S_CHUNK" $(obj_for "$planner") "$@"
+        planner.max_iter="$max_iter" chunk_size="$chunk" $(obj_for "$planner") "$@"
 }
 
 print_full_cmd() {  # $1 planner, $2 model
@@ -348,7 +382,7 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
     fi
 }
 # --- run ----------------------------------------------------------------------
-echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL ==="
+echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL OL=$OL ==="
 if [ "$DIRECT_CKBPT" = "1" ]; then
     echo "direct-checkpoint mode: running MPC on $CKBPT"
     model="$(basename "$CKBPT")"
@@ -366,6 +400,47 @@ for model in "${MODELS_SEL[@]}"; do
         continue
     fi
     for planner in "${PLANNERS[@]}"; do
+        if [ "$OL" = "1" ]; then
+            # --- OPEN LOOP: one plan for the whole goal horizon, executed once ---
+            # conf/plan_gd.yaml / conf/plan_cem.yaml (max_iter=1, n_taken_actions
+            # = goal_H -> the sub-planner looks goal_H/frameskip model steps ahead
+            # and the full action sequence is executed without re-planning).
+            # Outputs go to plan_outputs_{gd,cem}_ol/ so the closed-loop logs in
+            # plan_outputs_gd_mpc/ + plan_outputs_mpc_cem/ are left untouched.
+            case "$planner" in
+                gd_mpc)  ol_tag=gd_ol ;  RUN_CFG=plan_gd.yaml ;;
+                *)       ol_tag=cem_ol ; RUN_CFG=plan_cem.yaml ;;
+            esac
+            RUN_CHUNK="$OL_CHUNK"
+            echo "===== OPEN LOOP: $planner / $model (seeds: $SEEDS, n_evals=$OL_N_EVALS, chunk=$OL_CHUNK) ====="
+            for s in $SEEDS; do
+                rundir="plan_outputs_${ol_tag}/${model}_s${s}_gH${GOAL_H}"
+                # fresh run: logs.json is append-mode, so a crashed/partial dir
+                # would otherwise corrupt the new run's results.
+                rm -rf "$rundir"
+                if [ "$planner" = "gd_mpc" ]; then
+                    run_plan "$planner" "$model" "$rundir" "$OL_N_EVALS" 1 \
+                        seed="$s" planner.n_taken_actions="$GOAL_H" \
+                        planner.sub_planner.opt_steps="$OL_GD_OPT"
+                else
+                    run_plan "$planner" "$model" "$rundir" "$OL_N_EVALS" 1 \
+                        seed="$s" planner.n_taken_actions="$GOAL_H" \
+                        planner.sub_planner.num_samples="$OL_CEM_SAMPLES" \
+                        planner.sub_planner.opt_steps="$OL_CEM_OPT" \
+                        planner.sub_planner.sample_chunk_size="$OL_CEM_CHUNK"
+                fi
+                rc=$?
+                sr=$(get_sr "$rundir/logs.json")
+                if [ -z "$sr" ]; then
+                    echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    continue
+                fi
+                echo "  seed $s success_rate=$sr"
+            done
+            report_mean_std "$ol_tag" "$model" "$GOAL_H" $SEEDS
+            unset RUN_CFG RUN_CHUNK
+            continue
+        fi
         if [ "$FULL" = "1" ]; then
             echo "===== FULL MPC: $planner / $model (seeds: $SEEDS) ====="
             for s in $SEEDS; do

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Laptop environment exports for this repo (user kashyap, miniconda at $HOME/miniconda3).
 # Sourced by run.sh / run_mpc.sh / run_wall_ablation.sh / run_curvature_analysis.sh
-# from the repo root (they `cd` to their own directory first).
+# / run_loss_landscape_comparison.sh from the repo root (they `cd` to their own
+# directory first).
 
 # Datasets (DINO-WM download; layout: <dir>/{point_maze,point_maze_medium,pusht_noise,wall_single,...}).
 export DATASET_DIR="${DATASET_DIR:-$PWD/data/datasets}"

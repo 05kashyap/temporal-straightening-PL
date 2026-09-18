@@ -295,9 +295,18 @@ def plot_timeseries(env, results, outdir):
     return path
 
 def loss_landscape(wm, train_cfg, val, device, goal_H=25, grid=13,
-                   opt_steps=80, lr=0.1, action_range=2.0):
+                   opt_steps=80, lr=0.1, action_range=2.0, episode_idx=None):
     """Paper Fig. 4: fix first action (ax, ay), GD-optimize the rest of the
-    25-step horizon, return (ax_grid, grid_loss) of the min terminal loss."""
+    25-step horizon, return (ax_grid, grid_loss, episode_idx) of the min
+    terminal loss.
+
+    episode_idx: explicit held-out val episode to use. None (default) reproduces
+    the original behaviour exactly (the first val episode long enough for start
+    + goal). Pass an index to make the episode/start-goal pair a *controlled*
+    variable, so the same landscape can be compared across two checkpoints
+    (e.g. straighten vs straighten + p-reg) without the episode changing under
+    your feet.
+    """
     frameskip = int(train_cfg.frameskip)
     raw_act_dim = int(val.action_dim)
     act_dim = raw_act_dim * frameskip          # latent action dim (5 frames x 2)
@@ -307,7 +316,16 @@ def loss_landscape(wm, train_cfg, val, device, goal_H=25, grid=13,
     norm_zero = torch.cat([-am / ast] * frameskip)  # (act_dim,) normalized zero action
 
     # pick a val episode long enough for start + goal
-    idx = next(i for i in range(len(val)) if val.get_seq_length(i) >= goal_H + 1)
+    if episode_idx is None:
+        idx = next(i for i in range(len(val)) if val.get_seq_length(i) >= goal_H + 1)
+    else:
+        idx = int(episode_idx)
+        if not 0 <= idx < len(val):
+            raise ValueError(f"episode_idx={idx} out of range for {len(val)} val episodes")
+        if val.get_seq_length(idx) < goal_H + 1:
+            raise ValueError(
+                f"episode_idx={idx} has seq_length={val.get_seq_length(idx)} "
+                f"but needs >= goal_H+1 = {goal_H + 1}")
     obs, _, _, _ = val[idx]
     obs_0 = {k: v[0:1].unsqueeze(0).to(device) for k, v in obs.items()}   # (1,1,3,H,W)
     obs_g = {k: v[goal_H:goal_H + 1].unsqueeze(0).to(device) for k, v in obs.items()}
@@ -341,23 +359,54 @@ def loss_landscape(wm, train_cfg, val, device, goal_H=25, grid=13,
             grid_loss[i, j] = best
     return axs, grid_loss, idx
 
-def plot_landscape(env, results, outdir):
-    """results: list of dicts (label, axs, grid_loss) for the pusht variants."""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+def plot_landscape(env, results, outdir, fname=None, suptitle=None,
+                   figsize=(12, 12), cbar_outside=False):
+    """Heatmaps of the min attainable terminal loss vs the first action.
+
+    results: list of dicts (label, axs, grid_loss), one panel per result in
+    order, all on a shared colour scale (so panels of the same episode are
+    directly comparable). The defaults reproduce the original 2x2 four-variant
+    figure byte-for-byte; the optional kwargs allow a paired two-panel figure
+    (e.g. straighten vs straighten + p-reg on one episode) without touching any
+    existing caller.
+
+    cbar_outside: with matplotlib < 3.6, a colorbar created by
+    fig.colorbar(..., ax=<axes>) is moved *on top of* the right-hand panels by a
+    subsequent fig.tight_layout(). The default path keeps the original call order
+    (and hence the original pixels, overlap included) so existing figures stay
+    reproducible. cbar_outside=True lays the panels out first and adds the shared
+    bar afterwards, so it always sits outside the panel grid with no data hidden.
+    """
+    n = len(results)
+    ncols = 2 if n > 1 else 1
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axes = axes.ravel()
     all_loss = np.concatenate([r["grid_loss"].ravel() for r in results])
     vmin, vmax = np.nanmin(all_loss), np.nanpercentile(all_loss, 99)
-    for ax, r in zip(axes.ravel(), results):
+    for ax, r in zip(axes, results):
         im = ax.imshow(r["grid_loss"], origin="lower", aspect="auto",
                        extent=[r["axs"][0], r["axs"][-1], r["axs"][0], r["axs"][-1]],
                        cmap="magma", vmin=vmin, vmax=vmax)
         ax.set_title(f"{env} · {r['label']}")
         ax.set_xlabel("first action $a_x$ (normalized)")
         ax.set_ylabel("first action $a_y$ (normalized)")
-    fig.suptitle(f"{env}: min attainable terminal loss vs first action (darker = lower) — "
-                 "landscape should be smoother/closer to convex after straightening", fontsize=13)
-    fig.colorbar(im, ax=axes, fraction=0.02, pad=0.02, label="min terminal loss")
-    fig.tight_layout()
-    path = os.path.join(outdir, f"landscape_{env}.png")
+    for ax in axes[n:]:
+        ax.axis("off")
+    if suptitle is None:
+        suptitle = (f"{env}: min attainable terminal loss vs first action (darker = lower) — "
+                    "landscape should be smoother/closer to convex after straightening")
+    fig.suptitle(suptitle, fontsize=13)
+    if cbar_outside:
+        # tight_layout() first, then add the bar: it then gets its own space
+        # instead of being dropped over the right-hand panels (see docstring).
+        fig.tight_layout()
+        fig.colorbar(im, ax=axes.tolist(), fraction=0.046, pad=0.02,
+                     label="min terminal loss")
+    else:
+        fig.colorbar(im, ax=axes, fraction=0.02, pad=0.02, label="min terminal loss")
+        fig.tight_layout()
+    path = os.path.join(outdir, fname or f"landscape_{env}.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
