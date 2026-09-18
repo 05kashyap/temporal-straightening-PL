@@ -94,46 +94,32 @@ The model/training code (`train.py`, `models/`, `conf/`, `datasets/`, `planning/
 `metrics/`, `utils.py`, `custom_resolvers.py`, `plan.py`, `environment.yaml`,
 `README.md`, `EXPERIMENT.md`, `run_scripts/train_server.sh`, this file) **is** in git.
 
-**Not** in git — the clone will not have these:
+**Not** in git — a clone will not bring these:
 
 | gitignored (`.gitignore`) | why it matters |
 |---|---|
 | `data/` | the datasets (§3) |
 | `checkpoints/` | training run dirs (§6) |
 | `*outputs*` → `analysis_outputs/` | landscape/sweep outputs |
-| `results/` | **`results/LANDSCAPE_RESULTS.md`** + Fig. 4/5/6 notes live here |
-| `papers/` | the paper text |
-| `wandb/`, `figures/`, `Old results/` | logs / old figures |
+| `papers/` | the paper text is not distributed with the repo |
+| `results/`, `Old results/` | older write-ups. **As of 2026-09-18 `results/` no longer exists in the laptop working tree**: `results/LANDSCAPE_RESULTS.md` (the Fig. 4-6 write-up) went away with the pre-`train-server` docs and is not in git history, so bring your own copy if you have one — otherwise the figure scripts + their `--help` are the reference |
+| `wandb/`, `figures/` | logs / old figures |
 
-| untracked (not ignored, so also absent from the clone) | why it matters |
-|---|---|
-| `analysis/landscape_sweep.py`, `landscape_paper_figure.py`, `landscape_metrics.py`, `landscape_metric_audit.py`, `loss_landscape_comparison.py` | the whole figure pipeline (§8) |
-| `run_scripts/*.sh` **except** `train_server.sh` | `setup.sh`, `run.sh`, `run_mpc.sh`, `run_landscape_night.sh`, `run_landscape_paperstyle_full.sh`, … |
-| `helpers/` | `extract_planner_curves.py`, `aggregate_mpc_summary.py` |
-| `kaggle/` | Kaggle-only helpers (not for the server) |
+Everything that used to be untracked or uncommitted is **now committed on
+`train-server`** (tip `f2a53d7`, "*Updated vwm to parse cpkt paths properly*"): the whole
+`analysis/landscape_*` + `loss_landscape_comparison.py` figure pipeline, `run_scripts/*.sh`
+(incl. `setup.sh`, `run.sh`, `run_mpc.sh`, the landscape runners), `helpers/`, `kaggle/`,
+and the previously-uncommitted `conf/train.yaml` run-dir fix plus the log-only
+`models/visual_world_model.py` change. The laptop tree is clean and in sync with
+`origin/train-server`, so **a clone of this branch has all the code** — in particular
+`conf/train.yaml` now encodes the two-thirds component in the run-dir name, so
+`baseline`/`p_reg` and `straighten`/`both` can no longer share a folder even if you
+invoke `train.py` directly instead of the launcher.
 
-**Uncommitted working-tree edits on the laptop** (they exist only locally — the
-branch has the older version). Two are worth knowing about:
-
-1. `conf/train.yaml` — adds `${replace_substring:${training.twothirds},…}` to the
-   Hydra run-dir name. Without it, `p_reg` collides with `baseline` and `both`
-   collides with `straighten` (the same folder ⇒ a resumed run silently loads a
-   different variant's checkpoint; that is what the comment in the file warns about).
-   **`train_server.sh` is immune** because it passes an explicit `hydra.run.dir`,
-   but if you run `train.py` directly on the server you want this fix.
-2. `models/visual_world_model.py` — log lines only (prints the two-thirds settings).
-3. `curvature_analysis.py` — analysis-side changes (not needed for training).
-
-Ready-to-paste sync from the laptop (adjust `SERVER` and paths):
+So the only things to move by hand are the datasets (§3), the DINOv2 cache if the
+server is offline (§4), and (optionally) the paper text:
 
 ```bash
-REPO=~/Documents/Projects/temporal-straightening-PL
-rsync -av --exclude __pycache__ $REPO/analysis/     SERVER:~/temporal-straightening-PL/analysis/
-rsync -av --exclude __pycache__ $REPO/run_scripts/  SERVER:~/temporal-straightening-PL/run_scripts/
-rsync -av --exclude __pycache__ $REPO/helpers/      SERVER:~/temporal-straightening-PL/helpers/
-rsync -av $REPO/conf/train.yaml               SERVER:~/temporal-straightening-PL/conf/train.yaml
-rsync -av $REPO/models/visual_world_model.py  SERVER:~/temporal-straightening-PL/models/visual_world_model.py
-rsync -av $REPO/results/                      SERVER:~/temporal-straightening-PL/results/   # docs + figures
 rsync -av ~/Documents/utilities/markitdown/files/ts.md SERVER:~/temporal-straightening-PL/papers/ts.md
 ```
 
@@ -376,9 +362,10 @@ the figure stages are CPU-only.
 | `analysis/landscape_sweep.py`, `landscape_metrics.py`, `landscape_metric_audit.py`, `loss_landscape_comparison.py`, `curvature_distributions.py`, `linear_probe.py`, `helpers/extract_planner_curves.py` | the rest of the metric/figure pipeline (all untracked, rsync them). |
 
 Outputs land in `analysis_outputs/…` (gitignored), logs in
-`analysis_outputs/paper/logs/`. The write-up of what these figures mean, how to redraw
-them and the verified-vs-paper panel comparison is `results/LANDSCAPE_RESULTS.md`
-(gitignored — copy it over, §2).
+`analysis_outputs/paper/logs/`. The old write-up of what these figures mean, how to
+redraw them and the verified-vs-paper panel comparison
+(`results/LANDSCAPE_RESULTS.md`) is gone — see §2 — but each script's `--help`
+documents its stages and knobs.
 
 Start with the free stage:
 
