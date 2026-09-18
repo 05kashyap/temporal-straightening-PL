@@ -47,9 +47,13 @@
 #
 # WHERE THINGS ARE WRITTEN
 #   training  : $CKPT_ROOT/test/<run_name>/{checkpoints/model_{n,latest}.pth,
-#               train.log, hydra.yaml, rollout_plots/e<n>_rollout/*.png, wandb/}
+#               hydra.yaml, rollout_plots/e<n>_rollout/*.png, wandb/}
 #               train.py writes all of these relative to its run dir (Hydra chdirs
 #               there), so the run dir is the unit of "where are my artifacts".
+#   logs      : $CKPT_ROOT/logs/<run_name>.log -- each arm's own stdout+stderr, via
+#               `tee -a` (append, so a resumed arm keeps writing to the same file).
+#               train.py itself only logs to the console; run dirs written by older
+#               launchers may additionally contain a train.log of their own.
 #   artifacts : $ART_ROOT/<run_name> is a symlink to that run dir (LINK_RUNS=1).
 #               Decoded planner VIDEOS come from the PLANNING stage, which should
 #               write under $ART_ROOT: nothing in *training* emits videos, only
@@ -105,10 +109,29 @@ DATA_DIR_umaze="$REPO/data/datasets/point_maze"          # states.pth, actions.p
 DATA_DIR_medium="$REPO/data/datasets/point_maze_medium"  # same layout as umaze
 DATA_DIR_pusht="$REPO/data/datasets/pusht_noise"         # train/ and val/
 
-CKPT_ROOT="${CKPT_ROOT:-$REPO/checkpoints_server}"    # training run dirs (ckpts + logs + recon PNGs)
+CKPT_ROOT="${CKPT_ROOT:-$REPO/checkpoints/server}"   # training run dirs (ckpts + logs + recon PNGs)
 ART_ROOT="${ART_ROOT:-$REPO/analysis_outputs/server}"  # decoded videos / plan outputs (planning stage)
+# CKPT_ROOT keeps the literal "checkpoints/" substring on purpose: train.py derives
+# the wandb run name as saved_folder.split("checkpoints/")[-1] (train.py L38). The
+# nesting also means `checkpoints/` (gitignored) keeps server runs out of git, and
+# $REPO/checkpoints/test/... (laptop runs) can never be resumed by accident.
 
-PY="${PYTHON:-${PY:-$HOME/miniconda3/envs/ts/bin/python}}"  # the ts env python
+# Python for this repo. Priority: explicit $PYTHON > a working $PY (run_scripts/
+# setup.sh exports this laptop's env path) > the activated conda env
+# (`conda activate ts` -- the usual thing on a server) > this laptop's miniconda >
+# whatever `python` resolves to. The preflight below fails loudly, naming the exact
+# path, if the chosen interpreter has no torch.
+if [[ -n "${PYTHON:-}" ]]; then
+    PY="$PYTHON"                                           # explicit override wins
+elif [[ -z "${PY:-}" || ! -x "${PY:-}" ]]; then
+    if [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+        PY="$CONDA_PREFIX/bin/python"                      # activated env
+    elif [[ -x "$HOME/miniconda3/envs/ts/bin/python" ]]; then
+        PY="$HOME/miniconda3/envs/ts/bin/python"           # dev-laptop default
+    else
+        PY="$(command -v python || echo python)"           # PATH
+    fi
+fi
 # ────────────────────────────────────────────────────────────────────────────
 
 ENV_SEL="${1:-}"
@@ -346,7 +369,8 @@ train_arm() {  # $1 label, $2 straighten, $3 twothirds, $4 run name, $5 encoder_
     if [[ "$DRY_RUN" = "1" ]]; then
         return 0
     fi
-    "${cmd[@]}"
+    mkdir -p "$CKPT_ROOT/logs"
+    "${cmd[@]}" 2>&1 | tee -a "$CKPT_ROOT/logs/$name.log"
     if [[ "$LINK_RUNS" = "1" && -d "$run_dir" ]]; then
         ln -sfn "$run_dir" "$ART_ROOT/$name"
     fi
