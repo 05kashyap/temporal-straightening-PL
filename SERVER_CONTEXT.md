@@ -402,11 +402,13 @@ bash run_scripts/run_landscape_night.sh preflight     # replays every stage's ar
 5. Smoke test on one arm (§5) → 1 epoch completes, and
    `torch.load(.../checkpoints/model_latest.pth).keys()` contains `decoder`.
 6. Check the DINOv2 cache was populated (§4) so later runs don't depend on the network.
-7. Launch the six real jobs (tmux/`nohup`, §5) and watch the first `train.log` for one
-   epoch to get the real seconds/epoch on that card before walking away.
+7. Launch the six real jobs (tmux/`nohup`, §5) and watch the first arm's
+   `$CKPT_ROOT/logs/<run_name>.log` for one epoch to get the real seconds/epoch on that
+   card before walking away.
 
-When something looks off: `train.log` + `hydra.yaml` inside the run dir reproduce the
-exact configuration and the error, and `DRY_RUN=1` re-prints the argv that produced it.
+When something looks off: the run dir's `hydra.yaml` plus its
+`$CKPT_ROOT/logs/<run_name>.log` reproduce the exact configuration and the error, and
+`DRY_RUN=1` re-prints the argv that produced it.
 
 
 
