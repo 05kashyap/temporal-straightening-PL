@@ -144,18 +144,27 @@ ART_ROOT="${ART_ROOT:-$SCRATCH/datasets/worldmodelart}"             # decoded vi
 
 # Python for this repo. Priority: explicit $PYTHON > a working $PY (run_scripts/
 # setup.sh exports this laptop's env path) > the activated conda env
-# (`conda activate ts` -- the usual thing on a server) > this laptop's miniconda >
-# whatever `python` resolves to. The preflight below fails loudly, naming the exact
-# path, if the chosen interpreter has no torch.
+# (`conda activate ts` -- the usual thing on a server) > the ts env INSIDE the
+# server container (/opt/miniconda, see SERVER_CONTEXT.md) > this laptop's
+# miniconda > whatever `python` resolves to. The preflight below fails loudly,
+# naming the exact path, if the chosen interpreter has no torch.
+#
+# NOTE for the server: the ts env lives in the container overlay, so a launcher
+# started on the HOST (outside apptainer) falls through to /usr/bin/python, which
+# has no torch. Submit the grid instead -- run_scripts/submit_train_grid.sh wraps
+# everything in the container -- or enter the container and `conda activate ts`
+# first. Grid mode fails fast with that message; PYTHON=/path/to/python overrides.
 if [[ -n "${PYTHON:-}" ]]; then
     PY="$PYTHON"                                           # explicit override wins
 elif [[ -z "${PY:-}" || ! -x "${PY:-}" ]]; then
     if [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
         PY="$CONDA_PREFIX/bin/python"                      # activated env
+    elif [[ -x "/opt/miniconda/envs/ts/bin/python" ]]; then
+        PY="/opt/miniconda/envs/ts/bin/python"             # ts env in the container overlay
     elif [[ -x "$HOME/miniconda3/envs/ts/bin/python" ]]; then
         PY="$HOME/miniconda3/envs/ts/bin/python"           # dev-laptop default
     else
-        PY="$(command -v python || echo python)"           # PATH
+        PY="$(command -v python || echo python)"           # PATH (on a server host: /usr/bin/python)
     fi
 fi
 # ────────────────────────────────────────────────────────────────────────────
@@ -207,6 +216,24 @@ if [[ "$ENV_SEL" == "all" || "$ENV_SEL" == "grid" ]]; then
     echo "  per job : NUM_WORKERS=$NUM_WORKERS EPOCHS=$EPOCHS DRY_RUN=$DRY_RUN staggered ${STAGGER}s"
     echo "  logs    : $CKPT_ROOT/logs/<env>_<dino>.grid.log  (+ per-arm <run_name>.log)"
     echo "=========================================================================="
+
+    # Fail fast on the classic server mistake: running the launcher on the HOST,
+    # outside the container, where `python` is /usr/bin/python and has no torch.
+    # Without this, six children start and die one by one with the same message.
+    if ! "$PY" -c 'import torch' >/dev/null 2>&1; then
+        if [[ "$DRY_RUN" = "1" ]]; then
+            echo "  WARNING : '$PY' has no torch -- DRY_RUN still prints argvs, a real run will fail." >&2
+        else
+            echo "FATAL: interpreter '$PY' cannot import torch." >&2
+            echo "       On the server the ts env lives INSIDE the project container. Either submit the" >&2
+            echo "       grid (it wraps everything in apptainer):" >&2
+            echo "         bash run_scripts/submit_train_grid.sh" >&2
+            echo "         sbatch run_scripts/train_server.slurm all all" >&2
+            echo "       or enter the container and 'conda activate ts' first (SERVER_CONTEXT.md 4/8)." >&2
+            echo "       Override with PYTHON=/path/to/ts/env/bin/python." >&2
+            exit 1
+        fi
+    fi
 
     # Children are new processes and this script exports only a few vars, so pass
     # every knob explicitly: an un-exported EPOCHS/NUM_WORKERS would be invisible.
@@ -345,6 +372,10 @@ if [[ ! -x "$PY" ]]; then
 else
     if ! py_info="$("$PY" -c 'import torch,sys;print(sys.version.split()[0], "torch", torch.__version__, "cuda", torch.cuda.is_available(), (torch.cuda.get_device_name(0) if torch.cuda.is_available() else "-"))' 2>&1)"; then
         problems+=("$PY cannot import torch: $py_info")
+        problems+=("  -> most likely you are running OUTSIDE the project container: the ts env lives in"
+                    "     the overlay at /opt/miniconda. Use run_scripts/submit_train_grid.sh (one job,"
+                    "     all configs on one GPU) or enter the container and 'conda activate ts' first."
+                    "     SERVER_CONTEXT.md sections 4 and 8; PYTHON=/path/to/python overrides this.")
     else
         notes+=("python/torch: $py_info")
     fi
