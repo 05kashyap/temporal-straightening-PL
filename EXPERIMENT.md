@@ -64,7 +64,7 @@ For this setup: `umaze_cos1e-1_tttwothirds5e-2_agg32_projglobal_dim384_hw1_sgTru
 | `twothirds` | `twothirds5e-2` | Two-thirds power-law regularizer, `cos` mode, scale 0.05. See below. |
 | `TRAIN_DECODER` | **False** | Also train + save the VQVAE decoder (`model.train_decoder` and `has_decoder`). Required for planner videos. |
 | `decoder_start_epoch` | 1 | Decoder starts optimizing at this epoch (irrelevant when `TRAIN_DECODER=False`). |
-| `save_every_x_iterations` | 1000 | Checkpoint + wandb flush cadence. |
+| `save_every_x_iterations` | 0 | Mid-epoch checkpoint cadence. **0 = epoch-end saves only** (no per-1000-iter writes; each save wrote ~1 GB and just rewrote `model_<epoch>.pth`). Also gates the mid-epoch wandb flush. |
 | `save_every_x_epoch` | 1 | Save per-epoch checkpoints (`model_<epoch>.pth`). |
 
 ### Model architecture (for `encoder=dino_global`)
@@ -141,7 +141,7 @@ reaches the goal. `run.sh` runs two planners over the same eval episodes.
 | `num_start_frames` | 1 | Initial observation given to the model = 1 frame. |
 | `n_plot_samples` | 10 | How many episodes get plots/videos. |
 | `decode_for_viz` | true | Decode latent rollouts into images for the env-vs-imagined videos (needs a trained decoder). |
-| `model_epoch` | `latest` | Which checkpoint to load (`model_latest.pth`, updated every 1000 iters + every epoch). |
+| `model_epoch` | `latest` | Which checkpoint to load (`model_latest.pth`, updated every epoch). |
 
 ### Objective (how "reached the goal" is scored during planning)
 
@@ -220,8 +220,8 @@ GD planning `n_evals=50` ~0.8 GB, CEM planning `num_samples=200` ~0.8 GB -- all 
 3. **Regularizers train the projector, not the frozen DINO backbone.** With `encoder=dino_global`
    the curvature / two-thirds losses act on the trainable GlobalProjector output. (`encoder=dino` --
    no projector -- makes them inert; that is the paper's no-regularizer baseline.)
-4. **Checkpoint resume**: planning loads `model_latest.pth` (updated every 1000 iters and every
-   epoch), so interrupting training at any point still leaves a usable model for planning.
+4. **Checkpoint resume**: planning loads `model_latest.pth` (updated at every epoch end), so
+   interrupting training at any point still leaves a usable model for planning.
 
 ---
 

@@ -767,7 +767,7 @@ Hydra chdirs into the run dir, so it is the unit of "where are my artifacts"
 (`$CKPT_ROOT/test/<run_name>/`):
 
 ```
-checkpoints/model_latest.pth        # every epoch, and every 1000 batches
+checkpoints/model_latest.pth        # every epoch
 checkpoints/model_<epoch>.pth
 hydra.yaml                          # resolved config (+ wandb_run_id for resuming)
 rollout_plots/e<n>_rollout/*.png    # decoded reconstructions (reconstruct_every_x_batch=1000)
