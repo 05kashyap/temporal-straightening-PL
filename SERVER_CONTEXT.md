@@ -1,6 +1,499 @@
 # SERVER_CONTEXT.md — running this repo on a new machine
 
-Hand-off notes for reproducing the Temporal Straightening training run on a server.
+
+## # Running Code on NYU Torch
+
+This is my quick-reference workflow for running `temporal-straightening-PL` on NYU's Torch HPC cluster.
+
+## 1. Connect to Torch
+
+From my local machine:
+
+```bash
+ssh akn7847@login.torch.hpc.nyu.edu
+```
+
+My useful Slurm accounts are:
+
+```text
+torch_pr_718_cds
+torch_pr_718_cilvr
+```
+
+For this project, use:
+
+```text
+torch_pr_718_cds
+```
+
+Check available accounts with:
+
+```bash
+my_slurm_accounts
+```
+
+All Torch jobs need a valid `--account`.
+
+## 2. VS Code
+
+### Recommended: Torch code-server
+
+Torch provides VS Code-like `code-server` through Open OnDemand.
+
+Open:
+
+```text
+https://ood.torch.hpc.nyu.edu
+```
+
+Then:
+
+1. Log in.
+2. Open **Interactive Apps**.
+3. Start the **code-server / VS Code** app.
+4. Click **Connect to VS Code** when the session starts.
+5. Open:
+
+```text
+/home/akn7847/wm/temporal-straightening-PL
+```
+
+The code-server session is mainly for editing/browsing. Do not depend on it for the GPU itself.
+
+### Local VS Code Remote-SSH
+
+This is possible, but Torch's Microsoft device authentication can be awkward inside VS Code. If using it, the working SSH command is:
+
+```bash
+ssh akn7847@login.torch.hpc.nyu.edu
+```
+
+## 3. Start a GPU session
+
+For interactive development/testing:
+
+```bash
+srun \
+  --account=torch_pr_718_cds \
+  --gres=gpu:1 \
+  --cpus-per-task=4 \
+  --mem=16G \
+  --time=04:00:00 \
+  --pty bash
+```
+
+A shorter allocation is better when only testing.
+
+Example for a quick test:
+
+```bash
+srun \
+  --account=torch_pr_718_cds \
+  --gres=gpu:1 \
+  --cpus-per-task=2 \
+  --mem=10G \
+  --time=00:15:00 \
+  --pty bash
+```
+
+Check the node:
+
+```bash
+hostname
+nvidia-smi
+```
+
+## 4. Enter the project container
+
+The project uses this Torch CUDA image:
+
+```text
+/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif
+```
+
+The persistent writable overlay is:
+
+```text
+$SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3
+```
+
+Launch it with:
+
+```bash
+apptainer shell --fakeroot --nv \
+  --overlay $SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3 \
+  /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif
+```
+
+`--nv` exposes the NVIDIA GPU to the container.
+
+`--fakeroot` is required for the writable overlay setup.
+
+Do not run heavy container setup/install work on the login node; use a compute allocation.
+
+## 5. Activate the Conda environment
+
+Inside the container:
+
+```bash
+export PATH=/opt/miniconda/bin:$PATH
+source /opt/miniconda/etc/profile.d/conda.sh
+conda activate ts
+```
+
+Project directory:
+
+```bash
+cd /home/akn7847/wm/temporal-straightening-PL
+```
+
+The Conda environment is stored persistently in the overlay.
+
+## 6. Verify GPU/PyTorch
+
+Run:
+
+```bash
+python -c 'import torch; print("PyTorch:", torch.__version__); print("CUDA:", torch.version.cuda); print("CUDA available:", torch.cuda.is_available()); print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")'
+```
+
+Known-good result:
+
+```text
+PyTorch: 2.3.0
+CUDA: 12.1
+CUDA available: True
+GPU: NVIDIA A100-SXM4-80GB
+```
+
+Check important project packages:
+
+```bash
+python -m pip list | grep -E 'torch|torchvision|mujoco|d4rl|dm-control'
+```
+
+Expected versions:
+
+```text
+d4rl          1.1
+mujoco        3.2.7
+mujoco-py     2.1.2.14
+torch         2.3.0
+torchvision   0.18.0
+```
+
+## 7. Run the project
+
+Once inside the container with `ts` activated:
+
+```bash
+cd /home/akn7847/wm/temporal-straightening-PL
+```
+
+Then run the project's normal commands, for example:
+
+```bash
+python <project_script>.py
+```
+
+or its existing shell scripts:
+
+```bash
+bash <script>.sh
+```
+
+If the project uses Hydra/Submitit, let the project's existing configuration handle the experiment submission rather than manually changing its environment unless necessary.
+
+## 8. Batch jobs for long experiments
+
+For anything that should run unattended, use `sbatch` instead of keeping an interactive terminal open.
+
+Basic structure:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=ts
+#SBATCH --account=torch_pr_718_cds
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=04:00:00
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -e
+
+apptainer exec \
+  --fakeroot \
+  --nv \
+  --overlay "$SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3" \
+  /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \
+  bash -lc '
+    set -e
+
+    export PATH=/opt/miniconda/bin:$PATH
+    source /opt/miniconda/etc/profile.d/conda.sh
+    conda activate ts
+
+    cd /home/akn7847/wm/temporal-straightening-PL
+
+    python <project_script>.py
+  '
+```
+
+Submit:
+
+```bash
+sbatch run.slurm
+```
+
+Monitor:
+
+```bash
+squeue -u akn7847
+```
+
+Check a completed job:
+
+```bash
+sacct -j <JOBID> --format=JobID,State,Elapsed,ExitCode
+```
+
+Cancel a job:
+
+```bash
+scancel <JOBID>
+```
+
+## 9. Important filesystem locations
+
+### Project
+
+```text
+/home/akn7847/wm/temporal-straightening-PL
+```
+
+### Scratch
+
+```text
+/scratch/akn7847
+```
+
+Use `$SCRATCH` for large datasets, checkpoints, logs, and temporary files.
+
+Current personal scratch quota is approximately:
+
+```text
+5 TB / 5 million inodes
+```
+
+### Container overlay
+
+```text
+$SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3
+```
+
+### Miniconda inside overlay
+
+```text
+/opt/miniconda
+```
+
+### Conda environment
+
+```text
+/opt/conda-envs/ts
+```
+
+### Conda package cache
+
+```text
+/opt/conda-pkgs
+```
+
+## 10. Important container rule
+
+The base `.sif` is read-only. The persistent overlay contains the writable software environment.
+
+Therefore:
+
+- Project source code stays under `/home/akn7847/wm/temporal-straightening-PL`.
+- Large datasets/checkpoints should generally go under `$SCRATCH`.
+- Installed software/Conda packages live in the persistent overlay.
+- Always attach the same overlay when using the environment.
+
+Avoid simultaneously opening the writable overlay from multiple processes/jobs. For production jobs, the overlay should preferably be mounted read-only if possible.
+
+## 11. Typical workflow
+
+### Edit code
+
+Use Torch code-server:
+
+```text
+Open OnDemand → Interactive Apps → code-server → Connect to VS Code
+```
+
+Open:
+
+```text
+/home/akn7847/wm/temporal-straightening-PL
+```
+
+### Run a quick test
+
+From a terminal:
+
+```bash
+srun \
+  --account=torch_pr_718_cds \
+  --gres=gpu:1 \
+  --cpus-per-task=2 \
+  --mem=10G \
+  --time=00:15:00 \
+  --pty bash
+```
+
+Then:
+
+```bash
+apptainer shell --fakeroot --nv \
+  --overlay $SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3 \
+  /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif
+
+export PATH=/opt/miniconda/bin:$PATH
+source /opt/miniconda/etc/profile.d/conda.sh
+conda activate ts
+
+cd /home/akn7847/wm/temporal-straightening-PL
+```
+
+### Run a long experiment
+
+Create an `sbatch` script and submit:
+
+```bash
+sbatch run.slurm
+```
+
+This is preferable to leaving an interactive SSH/code-server terminal running for hours.
+
+## 12. Troubleshooting
+
+### `python` or `conda` not found
+
+Inside the container:
+
+```bash
+export PATH=/opt/miniconda/bin:$PATH
+source /opt/miniconda/etc/profile.d/conda.sh
+```
+
+Then:
+
+```bash
+conda activate ts
+```
+
+### CUDA is unavailable
+
+Make sure all three conditions are true:
+
+1. You are on a GPU Slurm allocation.
+2. The container was launched with `--nv`.
+3. The `ts` environment is activated.
+
+Check:
+
+```bash
+nvidia-smi
+```
+
+and:
+
+```bash
+python -c 'import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")'
+```
+
+### Overlay permission error
+
+Use:
+
+```bash
+apptainer shell --fakeroot --nv \
+  --overlay "$SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3" \
+  /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif
+```
+
+### Job is queued
+
+Check:
+
+```bash
+squeue -u akn7847
+```
+
+For a job's details:
+
+```bash
+scontrol show job <JOBID>
+```
+
+Smaller resource requests can sometimes schedule sooner.
+
+### Check job output
+
+For an `sbatch` job:
+
+```bash
+cat <job-name>-<JOBID>.out
+cat <job-name>-<JOBID>.err
+```
+
+or:
+
+```bash
+tail -f <job-name>-<JOBID>.out
+```
+
+## 13. Current known-good environment
+
+As of September 19, 2026:
+
+```text
+Cluster:        NYU Torch
+Account:        torch_pr_718_cds
+Project:        temporal-straightening-PL
+GPU tested:     NVIDIA A100-SXM4-80GB
+Host driver:    610.43.02
+Container:      CUDA 12.1.1 / Ubuntu 22.04
+nvcc:           CUDA 12.1.105
+PyTorch:        2.3.0
+Torchvision:    0.18.0
+Python:         3.9.23
+MuJoCo:         3.2.7
+mujoco-py:      2.1.2.14
+D4RL:           1.1
+Conda env:      ts
+```
+
+The environment has already been successfully tested with:
+
+```text
+CUDA available: True
+GPU: NVIDIA A100-SXM4-80GB
+===== COMPLETE =====
+```
+
+## Official NYU references
+
+- Torch VS Code / code-server: https://services.rt.nyu.edu/docs/hpc/tools_and_software/vscode_remote_ssh_torch/
+- Torch Slurm jobs: https://services.rt.nyu.edu/docs/hpc/submitting_jobs/slurm_submitting_jobs/
+- Torch Apptainer: https://services.rt.nyu.edu/docs/hpc/tutorial_apptainer/running_containers/
+- Conda with Singularity/Apptainer: https://services.rt.nyu.edu/docs/hpc/containers/singularity_with_conda/
+- Torch PyTorch guide: https://services.rt.nyu.edu/docs/hpc/ml_ai_hpc/pytorch_intro/
+
+## Hand-off notes for reproducing the Temporal Straightening training run on a server.
 Every claim below was checked on the development laptop (conda env `ts`, Python
 3.9.23, torch 2.3.0+cu121 — `nvidia-smi` there reports an RTX 3050 Ti Laptop GPU;
 `EXPERIMENT.md` in the repo was written on a 4070 12 GB machine) while writing this
