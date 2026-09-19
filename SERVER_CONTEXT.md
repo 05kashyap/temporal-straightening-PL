@@ -95,6 +95,19 @@ srun \
   --time=00:15:00 \
   --pty bash
 ```
+Full-size interactive allocation (enough for the six-configs-on-one-GPU
+run below):
+
+```bash
+srun \
+  --account=torch_pr_718_cds \
+  --gres=gpu:1 \
+  --constraint='h200' \
+  --cpus-per-task=48 \
+  --mem=192G \
+  --time=48:00:00 \
+  --pty bash
+```
 
 Check the node:
 
@@ -264,6 +277,55 @@ Cancel a job:
 ```bash
 scancel <JOBID>
 ```
+
+### One GPU, all six configs in parallel
+
+Slurm gives a GPU to an *allocation*, not to a process, so six `--gres=gpu:1`
+jobs can never share one card: the parallelism has to live inside a single
+allocation. `run_scripts/train_server.sh all` does exactly that -- it launches
+the six (environment, recipe) configs as concurrent children of one process and
+waits for them, each keeping its own run dir, logs and wandb dir.
+```bash
+# from a login node, inside the repo (ONE job, six configs, ONE GPU)
+bash run_scripts/submit_train_grid.sh                 # MODE=one-gpu (default)
+MODE=per-gpu bash run_scripts/submit_train_grid.sh    # the old 6-jobs/6-GPUs layout
+DRY_RUN=1 bash run_scripts/submit_train_grid.sh       # print the sbatch line only
+
+# already inside an allocation (srun): run the launcher directly
+bash run_scripts/train_server.sh all
+CONFIGS="umaze:global medium:global pusht:global" bash run_scripts/train_server.sh all
+MAX_PARALLEL=3 STAGGER=30 NUM_WORKERS=4 bash run_scripts/train_server.sh all
+DRY_RUN=1 bash run_scripts/train_server.sh all        # prints all 24 arm argvs
+```
+Sizing that matters:
+
+| | per run | x6 |
+|---|---|---|
+| VRAM | ~20 GB | ~120 GB of the H200's 140 GB (fits, ~15% headroom) |
+| CPU | 1 trainer + `NUM_WORKERS` loaders | `--cpus-per-task >= 6*NUM_WORKERS`, e.g. 48 |
+| RAM | model + workers | 192G is comfortable |
+
+`submit_train_grid.sh` submits `sbatch --cpus-per-task=48 --mem=192G
+--time=48:00:00 run_scripts/train_server.slurm all all`. Those flags override the
+`#SBATCH` header inside the (gitignored) `train_server.slurm`, so that
+server-local file needs no edits; the launcher's env knobs reach the container
+because apptainer passes the host environment through. A job that hits its time
+limit is safe to resubmit: `train.py` resumes from `checkpoints/model_latest.pth`
+and checkpoints are written at every epoch end (`save_every_x_iterations: 0`).
+
+Watch out for:
+
+- `NUM_WORKERS=16` x 6 = 96 dataloader workers. GRID mode defaults it to 4, and
+  pins `OMP_NUM_THREADS=nproc/MAX_PARALLEL` (torch otherwise lets every process
+  use every core).
+- IO, not VRAM, is usually the limit: `PointMazeDataset._load_episode_visual_tensor`
+  (`datasets/point_maze_dset.py:132`) `torch.load`s a whole episode for every
+  sampled slice and caches nothing, so many workers mean heavy repeated reads
+  from /scratch. A per-worker episode cache is the follow-up if this bites.
+- `STAGGER=30` spaces the launches; they all call `torch.hub.load` for DINOv2 at
+  startup (`models/dino.py:146`).
+- If the three `global` (batch 32) runs OOM, stage them with `CONFIGS=...` or
+  lower `MAX_PARALLEL`.
 
 ## 9. Important filesystem locations
 

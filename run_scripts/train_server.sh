@@ -4,7 +4,7 @@
 # TRAINING ONLY: no planning, no eval, no result aggregation.
 #
 # The four arms (the repo's arm vocabulary, helpers/extract_planner_curves.py):
-#   baseline    training.straighten=False        training.twothirds=Faecho $CUDA_VISIBLE_DEVICESlse
+#   baseline    training.straighten=False        training.twothirds=False
 #   straighten  training.straighten=<curvature>  training.twothirds=False
 #   p_reg       training.straighten=False        training.twothirds=<P-Reg>
 #   both        both regularizers
@@ -20,6 +20,28 @@
 # One job = 4 sequential runs; the full grid is {umaze,medium,pusht} x
 # {channel,global} = 6 jobs. The optional 3rd argument pins
 # CUDA_VISIBLE_DEVICES so several jobs can share a node without all using GPU 0.
+#
+# GRID MODE -- ALL SIX CONFIGS IN PARALLEL ON ONE GPU:
+#   bash run_scripts/train_server.sh all            # or: grid
+#   CONFIGS="umaze:global medium:global pusht:global" bash run_scripts/train_server.sh all
+#   MAX_PARALLEL=4 STAGGER=60 NUM_WORKERS=4 bash run_scripts/train_server.sh all
+#
+#   Slurm cannot give one GPU to several ALLOCATIONS (each --gres=gpu:1 job owns
+#   its device), so the parallelism lives INSIDE one allocation: `all` launches
+#   the configs as concurrent children of this script and waits for them. That is
+#   what run_scripts/submit_train_grid.sh submits --
+#     sbatch --cpus-per-task=48 --mem=192G --time=48:00:00 \
+#            run_scripts/train_server.slurm all all
+#   Each child is an ordinary single-process run: Hydra is in RUN mode, so there
+#   is no DDP rendezvous and no MASTER_PORT collision (train.py only calls
+#   dist.init_process_group for RunMode.MULTIRUN, train.py L41). Children keep
+#   their own run dirs, logs and wandb dirs.
+#
+#   Sizing: a run needs ~20 GB of VRAM, so 6 x 20 GB = 120 GB of an H200's 140 GB
+#   (fits with ~15% headroom). Grid mode therefore defaults NUM_WORKERS=4 -- not
+#   16, since 6 x 16 = 96 dataloader workers would thrash the node and /scratch --
+#   and pins OMP_NUM_THREADS=nproc/MAX_PARALLEL, because torch otherwise lets
+#   every process use every core. Request --cpus-per-task >= MAX_PARALLEL*NUM_WORKERS.
 #
 # GPU-AGNOSTIC: nothing here is tuned to a particular card. Batch size, epochs and
 # lrs are the paper's numbers and are NOT scaled by device name, so the same
@@ -73,6 +95,7 @@
 # Knobs (env vars, all optional): EPOCHS=20 BATCH_SIZE= NUM_HIST=3 NUM_WORKERS=
 #   REG_WINDOW= FRESH=0 DRY_RUN=0 SKIP_FINISHED=1 LINK_RUNS=1 CKPT_ROOT= ART_ROOT=
 #   PYTHON= GPU= (or the 3rd positional) WANDB_MODE=offline
+# Grid-mode only: CONFIGS="<env>:<dino> ..." MAX_PARALLEL= STAGGER=30 OMP_NUM_THREADS=
 # =============================================================================
 set -euo pipefail
 
@@ -140,8 +163,9 @@ fi
 ENV_SEL="${1:-}"
 DINO="${2:-}"
 GPU="${3:-${GPU:-}}"
-if [[ -z "$ENV_SEL" || -z "$DINO" ]]; then
+if [[ -z "$ENV_SEL" || ( -z "$DINO" && "$ENV_SEL" != all && "$ENV_SEL" != grid ) ]]; then
     echo "usage: bash run_scripts/train_server.sh <umaze|medium|pusht> <channel|global> [gpu-index]" >&2
+    echo "       bash run_scripts/train_server.sh <all|grid>   # every config on ONE GPU, in parallel" >&2
     exit 2
 fi
 
@@ -154,6 +178,85 @@ DRY_RUN="${DRY_RUN:-0}"               # 1 = print everything, train nothing
 SKIP_FINISHED="${SKIP_FINISHED:-1}"   # 1 = skip an arm whose saved epoch >= EPOCHS
 LINK_RUNS="${LINK_RUNS:-1}"           # 1 = symlink each run dir into $ART_ROOT
 BATCH_OVERRIDE="${BATCH_SIZE:-}"      # empty = the per-recipe default below
+
+# ─── grid mode: every config on the ONE visible GPU ─────────────────────────
+# `all` / `grid` re-invokes this script once per (env, dino) pair as background
+# children (a wave at a time) and waits for them. Slurm hands one GPU to one
+# ALLOCATION, so co-scheduling lives here, not in the submission script.
+if [[ "$ENV_SEL" == "all" || "$ENV_SEL" == "grid" ]]; then
+    SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+    CONFIGS="${CONFIGS:-umaze:channel umaze:global medium:channel medium:global pusht:channel pusht:global}"
+    read -r -a _cfgs <<< "$CONFIGS"
+    if [[ ${#_cfgs[@]} -eq 0 ]]; then
+        echo "CONFIGS is empty -- nothing to launch" >&2; exit 2
+    fi
+    MAX_PARALLEL="${MAX_PARALLEL:-${#_cfgs[@]}}"
+    STAGGER="${STAGGER:-30}"
+    if [[ "$DRY_RUN" = "1" ]]; then STAGGER=0; fi       # a dry run should not sleep
+    NUM_WORKERS="${NUM_WORKERS:-4}"                     # 6 x 16 workers would thrash node + /scratch
+    if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+        OMP_NUM_THREADS=$(( ($(nproc) + MAX_PARALLEL - 1) / MAX_PARALLEL ))
+    fi
+    MKL_NUM_THREADS="${MKL_NUM_THREADS:-$OMP_NUM_THREADS}"
+    export OMP_NUM_THREADS MKL_NUM_THREADS
+
+    echo "=========================================================================="
+    echo "train_server.sh GRID: ${#_cfgs[@]} configs, waves of $MAX_PARALLEL, ONE GPU"
+    echo "  configs : $CONFIGS"
+    echo "  device  : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all visible>}   nproc=$(nproc)   cores/child=$OMP_NUM_THREADS"
+    echo "  per job : NUM_WORKERS=$NUM_WORKERS EPOCHS=$EPOCHS DRY_RUN=$DRY_RUN staggered ${STAGGER}s"
+    echo "  logs    : $CKPT_ROOT/logs/<env>_<dino>.grid.log  (+ per-arm <run_name>.log)"
+    echo "=========================================================================="
+
+    # Children are new processes and this script exports only a few vars, so pass
+    # every knob explicitly: an un-exported EPOCHS/NUM_WORKERS would be invisible.
+    child_env=("TRAIN_SERVER_GRID=1")
+    for _v in PY PYTHON CKPT_ROOT ART_ROOT EPOCHS NUM_HIST NUM_WORKERS REG_WINDOW FRESH \
+              DRY_RUN SKIP_FINISHED LINK_RUNS WANDB_MODE DATASET_DIR TORCH_HOME \
+              PYTORCH_CUDA_ALLOC_CONF OMP_NUM_THREADS MKL_NUM_THREADS GPU; do
+        if [[ -n "${!_v:-}" ]]; then child_env+=("$_v=${!_v}"); fi
+    done
+    if [[ -n "$BATCH_OVERRIDE" ]]; then child_env+=("BATCH_SIZE=$BATCH_OVERRIDE"); fi
+
+    mkdir -p "$CKPT_ROOT/logs"
+    rc_total=0
+    _w=0
+    while (( _w < ${#_cfgs[@]} )); do
+        _wave=( "${_cfgs[@]:_w:MAX_PARALLEL}" )
+        pids=(); labels=(); logs=()
+        for cfg in "${_wave[@]}"; do
+            _e="${cfg%%:*}"; _d="${cfg##*:}"
+            _log="$CKPT_ROOT/logs/${_e}_${_d}.grid.log"
+            echo "  start    ${_e}/${_d}  ->  $_log"
+            env "${child_env[@]}" bash "$SELF" "$_e" "$_d" "$GPU" >"$_log" 2>&1 &
+            pids+=("$!"); labels+=("$_e/$_d"); logs+=("$_log")
+            if [[ "$STAGGER" -gt 0 ]]; then sleep "$STAGGER"; fi
+        done
+        _i=0
+        for _pid in "${pids[@]}"; do
+            if wait "$_pid"; then
+                echo "  [done]   ${labels[$_i]}"
+            else
+                _rc=$?
+                echo "  [FAILED] ${labels[$_i]} (exit $_rc) -- see ${logs[$_i]}" >&2
+                rc_total=1
+            fi
+            _i=$(( _i + 1 ))
+        done
+        _w=$(( _w + MAX_PARALLEL ))
+    done
+
+    echo
+    echo "=========================================================================="
+    echo "grid done at $(date '+%F %H:%M:%S')  configs=${#_cfgs[@]}  waves=$(( (${#_cfgs[@]} + MAX_PARALLEL - 1) / MAX_PARALLEL ))"
+    echo "  grid logs : $CKPT_ROOT/logs/<env>_<dino>.grid.log"
+    echo "  arm logs  : $CKPT_ROOT/logs/<run_name>.log   (4 arms per config, sequential)"
+    if [[ "$rc_total" != "0" ]]; then
+        echo "at least one config failed -- read its .grid.log for the failing arm" >&2
+        exit 1
+    fi
+    exit 0
+fi
 
 case "$ENV_SEL" in
     umaze)  TRAIN_ENV=point_maze;        DATA_PATH="$DATA_DIR_umaze";  CHECK_DATA=(states.pth actions.pth obses) ;;
