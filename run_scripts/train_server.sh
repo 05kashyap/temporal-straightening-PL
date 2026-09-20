@@ -84,9 +84,13 @@
 # RESUMING / EPOCHS
 #   train.py auto-resumes from <run_dir>/checkpoints/model_latest.pth (weights,
 #   optimizers, epoch, mid-epoch batch), so re-running a job continues it.
-#   training.epochs is PER LAUNCH: a re-launch of a finished run would train
-#   EPOCHS *more* epochs, hence the default SKIP_FINISHED=1 guard, which skips an
-#   arm whose saved epoch >= EPOCHS.
+#   training.epochs is the TARGET TOTAL (training.epochs_mode=target, the default in
+#   conf/train.yaml): an arm saved at epoch 12 with EPOCHS=20 trains 13..20 and stops.
+#   It never overshoots; raise EPOCHS to train an arm further (EPOCHS=25 -> 21..25), or set
+#   training.epochs_mode=additional for the legacy behaviour of adding EPOCHS per launch.
+#   SKIP_FINISHED=1 (default, target mode only) skips an arm that already reached EPOCHS.
+#   STATUS=1 lists what each arm still needs and trains nothing; grid mode probes with it
+#   to skip fully-finished configs (sugar: bash run_scripts/train_server.sh status).
 #
 # SERVER REQUIREMENTS: the `ts` conda env (environment.yaml), the three datasets,
 #   and the pinned DINOv2 weights (torch.hub pulls facebookresearch/dinov2 @
@@ -94,7 +98,7 @@
 #
 # Knobs (env vars, all optional): EPOCHS=20 BATCH_SIZE= NUM_HIST=3 NUM_WORKERS=
 #   REG_WINDOW= FRESH=0 DRY_RUN=0 SKIP_FINISHED=1 LINK_RUNS=1 CKPT_ROOT= ART_ROOT=
-#   PYTHON= GPU= (or the 3rd positional) WANDB_MODE=offline
+#   PYTHON= GPU= (or the 3rd positional) WANDB_MODE=offline EPOCHS_MODE=target STATUS=0
 # Grid-mode only: CONFIGS="<env>:<dino> ..." MAX_PARALLEL= STAGGER=30 OMP_NUM_THREADS=
 # =============================================================================
 set -euo pipefail
@@ -170,21 +174,34 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 
 ENV_SEL="${1:-}"
+# `status` sugar: report every arm resume state and exit (same as STATUS=1).
+if [[ "$ENV_SEL" == "status" ]]; then STATUS=1; ENV_SEL=all; fi
 DINO="${2:-}"
 GPU="${3:-${GPU:-}}"
 if [[ -z "$ENV_SEL" || ( -z "$DINO" && "$ENV_SEL" != all && "$ENV_SEL" != grid ) ]]; then
     echo "usage: bash run_scripts/train_server.sh <umaze|medium|pusht> <channel|global> [gpu-index]" >&2
     echo "       bash run_scripts/train_server.sh <all|grid>   # every config on ONE GPU, in parallel" >&2
+    echo "       bash run_scripts/train_server.sh status       # which arms still need training (no GPU work)" >&2
     exit 2
 fi
 
-EPOCHS="${EPOCHS:-20}"                # per launch (paper: 20 epochs for the mazes)
+EPOCHS="${EPOCHS:-20}"                # target total epochs per arm (paper: 20 for the mazes)
+# Epoch semantics, read out of the config so the launcher skip logic matches train.py:
+#   target     (default) -- EPOCHS is the total number of epochs the arm should reach.
+#   additional           -- legacy: every launch trains EPOCHS more epochs.
+EPOCHS_MODE="${EPOCHS_MODE:-$(grep -m1 -oE '^[[:space:]]*epochs_mode:[[:space:]]*[A-Za-z]+' "$REPO/conf/train.yaml" 2>/dev/null | awk -F: '{print $2}' | tr -d '[:space:]' || true)}"
+EPOCHS_MODE="${EPOCHS_MODE:-target}"
+case "$EPOCHS_MODE" in
+    target|additional) ;;
+    *) echo "EPOCHS_MODE must be target or additional (got '$EPOCHS_MODE')" >&2; exit 2 ;;
+esac
+STATUS="${STATUS:-0}"                 # 1 = report per-arm resume state and exit
 NUM_HIST="${NUM_HIST:-3}"             # paper Table 3: 3 history frames
 NUM_WORKERS="${NUM_WORKERS:-}"        # empty = conf/env/*.yaml (16)
 REG_WINDOW="${REG_WINDOW:-}"          # empty = num_hist+num_pred; override the P-Reg stats window
 FRESH="${FRESH:-0}"                   # 1 = delete the 4 run dirs before training
 DRY_RUN="${DRY_RUN:-0}"               # 1 = print everything, train nothing
-SKIP_FINISHED="${SKIP_FINISHED:-1}"   # 1 = skip an arm whose saved epoch >= EPOCHS
+SKIP_FINISHED="${SKIP_FINISHED:-1}"   # 1 = skip an arm that already reached EPOCHS (target mode)
 LINK_RUNS="${LINK_RUNS:-1}"           # 1 = symlink each run dir into $ART_ROOT
 BATCH_OVERRIDE="${BATCH_SIZE:-}"      # empty = the per-recipe default below
 
@@ -240,10 +257,20 @@ if [[ "$ENV_SEL" == "all" || "$ENV_SEL" == "grid" ]]; then
     child_env=("TRAIN_SERVER_GRID=1")
     for _v in PY PYTHON CKPT_ROOT ART_ROOT EPOCHS NUM_HIST NUM_WORKERS REG_WINDOW FRESH \
               DRY_RUN SKIP_FINISHED LINK_RUNS WANDB_MODE DATASET_DIR TORCH_HOME \
-              PYTORCH_CUDA_ALLOC_CONF OMP_NUM_THREADS MKL_NUM_THREADS GPU; do
+              PYTORCH_CUDA_ALLOC_CONF OMP_NUM_THREADS MKL_NUM_THREADS GPU EPOCHS_MODE; do
         if [[ -n "${!_v:-}" ]]; then child_env+=("$_v=${!_v}"); fi
     done
     if [[ -n "$BATCH_OVERRIDE" ]]; then child_env+=("BATCH_SIZE=$BATCH_OVERRIDE"); fi
+
+    # STATUS mode (grid): report every config, then STOP -- never launch a child.
+    if [[ "$STATUS" = "1" ]]; then
+        for cfg in "${_cfgs[@]}"; do
+            _e="${cfg%%:*}"; _d="${cfg##*:}"
+            echo "== ${_e}/${_d}"
+            env "${child_env[@]}" STATUS=1 bash "$SELF" "$_e" "$_d" || true
+        done
+        exit 0
+    fi
 
     mkdir -p "$CKPT_ROOT/logs"
     rc_total=0
@@ -254,8 +281,16 @@ if [[ "$ENV_SEL" == "all" || "$ENV_SEL" == "grid" ]]; then
         for cfg in "${_wave[@]}"; do
             _e="${cfg%%:*}"; _d="${cfg##*:}"
             _log="$CKPT_ROOT/logs/${_e}_${_d}.grid.log"
+            # Probe this config first: the STATUS report is cheap (it only reads
+            # checkpoints) and lets us skip configs whose four arms are all at target.
+            _st="$(env "${child_env[@]}" STATUS=1 bash "$SELF" "$_e" "$_d" 2>&1 || true)"
+            if [[ "$_st" == *STATUS_ALL_DONE=1* ]]; then
+                echo "  [skip]   ${_e}/${_d}  -- all 4 arms already at target $EPOCHS"
+                continue
+            fi
+            printf '%s\n' "$_st" | sed 's/^/      /'
             echo "  start    ${_e}/${_d}  ->  $_log"
-            env "${child_env[@]}" bash "$SELF" "$_e" "$_d" "$GPU" >"$_log" 2>&1 &
+            env "${child_env[@]}" STATUS=0 bash "$SELF" "$_e" "$_d" "$GPU" >"$_log" 2>&1 &
             pids+=("$!"); labels+=("$_e/$_d"); logs+=("$_log")
             if [[ "$STAGGER" -gt 0 ]]; then sleep "$STAGGER"; fi
         done
@@ -356,6 +391,41 @@ case "$ENV_SEL:$DINO" in
         exit 2
         ;;
 esac
+# ─── STATUS: what each arm still needs (no training, no dataset/GPU preflight) ─
+# Reads only <run_dir>/checkpoints/model_latest.pth, so grid mode can probe every
+# config cheaply before deciding what to launch.
+if [[ "$STATUS" = "1" ]]; then
+    echo "=== $ENV_SEL:$DINO   target EPOCHS=$EPOCHS   epochs_mode=$EPOCHS_MODE"
+    printf '    %-68s %6s %8s  %s\n' "arm (run_name)" "saved" "target" "state"
+    _done=0; _res=0; _fresh=0
+    for _n in "$NAME_BASELINE" "$NAME_STRAIGHTEN" "$NAME_PREG" "$NAME_BOTH"; do
+        _ck="$CKPT_ROOT/test/$_n/checkpoints/model_latest.pth"
+        if [[ ! -f "$_ck" ]]; then
+            printf '    %-68s %6s %8s  %s\n' "$_n" "-" "$EPOCHS" "fresh (no ckpt)"
+            _fresh=$((_fresh + 1)); continue
+        fi
+        _ss="$("$PY" -c 'import sys,torch;ck=torch.load(sys.argv[1],map_location="cpu");print(int(ck.get("epoch") or 0), int(ck.get("current_iter") or 0))' "$_ck" 2>/dev/null || true)"
+        read -r _se _si <<< "$_ss"
+        if [[ ! "${_se:-}" =~ ^[0-9]+$ ]]; then
+            printf '    %-68s %6s %8s  %s\n' "$_n" "?" "$EPOCHS" "unreadable ckpt"
+            _res=$((_res + 1)); continue
+        fi
+        _si="${_si:-0}"
+        if [[ "$EPOCHS_MODE" = "target" && "$_se" -ge "$EPOCHS" && "$_si" -eq 0 ]]; then
+            printf '    %-68s %6s %8s  %s\n' "$_n" "$_se" "$EPOCHS" "done"
+            _done=$((_done + 1))
+        else
+            _first="$(( _si > 0 ? _se : _se + 1 ))"; if [[ "$_first" -lt 1 ]]; then _first=1; fi
+            if [[ "$EPOCHS_MODE" = "target" ]]; then _last="$EPOCHS"; else _last=$(( _first + EPOCHS - 1 )); fi
+            printf '    %-68s %6s %8s  %s\n' "$_n" "$_se" "$EPOCHS" "resume -> trains $_first..$_last"
+            _res=$((_res + 1))
+        fi
+    done
+    echo "    summary: $_done done, $_res to resume, $_fresh fresh (of 4 arms)"
+    if [[ "$_done" -eq 4 ]]; then echo "STATUS_ALL_DONE=1"; fi
+    exit 0
+fi
+
 BATCH_SIZE="${BATCH_OVERRIDE:-$DEF_BATCH}"
 
 # ─── preflight ──────────────────────────────────────────────────────────────
@@ -468,15 +538,19 @@ train_arm() {  # $1 label, $2 straighten, $3 twothirds, $4 run name, $5 encoder_
     fi
 
     if [[ "$SKIP_FINISHED" = "1" && "$FRESH" != "1" && -f "$latest" ]]; then
-        local saved_epoch=""
-        saved_epoch="$("$PY" -c 'import sys,torch;ck=torch.load(sys.argv[1],map_location="cpu");print(int(ck.get("epoch") or 0))' "$latest" 2>/dev/null || echo "")"
-        if [[ -n "$saved_epoch" && "$saved_epoch" -ge "$EPOCHS" ]]; then
-            echo "    already trained: saved epoch $saved_epoch >= EPOCHS=$EPOCHS -- skipping"
-            echo "    (EPOCHS=$((EPOCHS + saved_epoch)) to extend it, or FRESH=1 to restart)"
+        local saved_state="" saved_epoch="" saved_iter="0"
+        saved_state="$("$PY" -c 'import sys,torch;ck=torch.load(sys.argv[1],map_location="cpu");print(int(ck.get("epoch") or 0), int(ck.get("current_iter") or 0))' "$latest" 2>/dev/null || true)"
+        read -r saved_epoch saved_iter <<< "$saved_state"
+        saved_iter="${saved_iter:-0}"
+        # target mode: finished only when the target epoch is complete (current_iter == 0).
+        # additional mode never skips -- each launch is meant to add EPOCHS more.
+        if [[ "$EPOCHS_MODE" = "target" && "${saved_epoch:-}" =~ ^[0-9]+$ && "$saved_epoch" -ge "$EPOCHS" && "$saved_iter" -eq 0 ]]; then
+            echo "    already at target: saved epoch $saved_epoch >= EPOCHS=$EPOCHS -- skipping"
+            echo "    (raise EPOCHS to train it further, or FRESH=1 to restart from scratch)"
             return 0
         fi
-        if [[ -n "$saved_epoch" ]]; then
-            echo "    resuming from epoch $saved_epoch (this launch trains $EPOCHS more)"
+        if [[ "${saved_epoch:-}" =~ ^[0-9]+$ ]]; then
+            echo "    resuming: saved epoch $saved_epoch (batch $saved_iter into it) -> target $EPOCHS [$EPOCHS_MODE mode]"
         fi
     fi
 

@@ -35,6 +35,10 @@ hydra:
 training:
   seed: 0
   epochs: 20
+  # target     = training.epochs is the TOTAL number of epochs a run should reach, so a resume
+  #              FINISHES the run (saved epoch 12 with epochs=20 trains 13..20) instead of
+  # additional = legacy behaviour: every launch trains `epochs` MORE epochs (12 -> 32).
+  epochs_mode: target
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   # 0 = epoch-end saves only. A mid-epoch save wrote ~0.8-1.1 GB (model_latest.pth plus a rewrite of

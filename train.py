@@ -28,6 +28,36 @@ import models.dino  # noqa: F401  # Puts the pinned DINOv2 package on sys.path s
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+def epoch_window(saved_epoch, current_iter, epochs, mode="target"):
+    """Inclusive (first_epoch, last_epoch) for this launch, or None if nothing to do.
+
+    saved_epoch / current_iter come from the checkpoint (Trainer._keys_to_save);
+    `epochs` is cfg.training.epochs and `mode` is cfg.training.epochs_mode:
+
+      mode="target"     -- `epochs` is the TOTAL number of epochs the run should reach.
+                           A resume therefore finishes the run (saved 12 -> 13..20) instead
+                           of adding another `epochs` on top. Runs that already overshot
+                           (saved > epochs) are never trained backwards.
+      mode="additional" -- legacy behaviour: each launch trains exactly `epochs` MORE
+                           epochs from the resume point (saved 12 -> 13..32).
+
+    A mid-pass interruption (current_iter > 0) resumes inside the saved epoch, matching
+    the dataloader start_iter behaviour; otherwise the saved epoch is complete.
+    An interruption inside the FINAL epoch (saved == epochs, current_iter > 0) therefore
+    still runs that epoch to completion: that is what reaching the target means.
+    """
+    start = saved_epoch if current_iter > 0 else saved_epoch + 1   # epochs are 1-based
+    start = max(int(start), 1)
+    epochs = int(epochs)
+    if mode == "target":
+        last = epochs
+        return (start, last) if start <= last else None
+    if mode == "additional":
+        return start, start + epochs - 1
+    raise ValueError(f"unknown epochs_mode {mode!r}")
+
+
+
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -74,6 +104,9 @@ class Trainer:
 
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
+        # "target" (default): the total epochs this run should reach. "additional" is the
+        # legacy "train this many MORE epochs per launch". Old configs (no key) -> target.
+        self.epochs_mode = str(self.cfg.training.get("epochs_mode", "target"))
         self.epoch = 0
         self.current_iter = 0  # batches completed in the current epoch pass (mid-epoch resume)
         self.decoder_start_epoch = int(self.cfg.training.get("decoder_start_epoch", 1))
@@ -480,11 +513,34 @@ class Trainer:
             )
             self.monitor_thread.start()
 
-        # Resume semantics:
+        # Resume semantics (see epoch_window at the top of this file):
         #   current_iter > 0  => `self.epoch` was interrupted mid-pass; finish that pass first.
         #   current_iter == 0 => `self.epoch` is complete (fresh start at 0 -> epoch 1).
-        first_epoch = self.epoch if self.current_iter > 0 else self.epoch + 1  # epoch starts from 1
-        for epoch in range(first_epoch, first_epoch + self.total_epochs):
+        # epochs_mode="target" (default) stops at training.epochs; "additional" keeps the
+        # legacy "each launch trains `epochs` more" behaviour.
+        window = epoch_window(
+            self.epoch, self.current_iter, self.total_epochs, self.epochs_mode
+        )
+        if window is None:
+            log.info(
+                "nothing to train: saved epoch %s is already at/over target %s (mode=%s)",
+                self.epoch,
+                self.total_epochs,
+                self.epochs_mode,
+            )
+            return
+        first_epoch, last_epoch = window
+        log.info(
+            "resume plan: saved epoch %s current_iter %s -> training epochs %s..%s "
+            "(target %s, mode=%s)",
+            self.epoch,
+            self.current_iter,
+            first_epoch,
+            last_epoch,
+            self.total_epochs,
+            self.epochs_mode,
+        )
+        for epoch in range(first_epoch, last_epoch + 1):
             self.epoch = epoch
             if self.accelerator.is_main_process:
                 decoder_active = self.decoder_training_active()

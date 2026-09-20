@@ -21,7 +21,7 @@ Exactly what `run.sh` executes for the active variant (step 7/8):
 PY=/home/shanveen-ortho-clinic/miniconda3/envs/ts/bin/python
 M=test/umaze_cos1e-1_tttwothirds5e-2_agg32_projglobal_dim384_hw1_sgTrue_lr1e-05
 
-# training (10 epochs per launch -- see the resume caveat below)
+# training (10 epochs total -- see the epoch-semantics caveat below)
 "$PY" train.py --config-name train.yaml env=point_maze encoder=dino_global \
   training.straighten=cos1e-1 training.twothirds=twothirds5e-2 \
   training.batch_size=8 training.epochs=10 \
@@ -52,7 +52,7 @@ For this setup: `umaze_cos1e-1_tttwothirds5e-2_agg32_projglobal_dim384_hw1_sgTru
 | `num_hist` | 3 | Context frames the predictor conditions on. |
 | `num_pred` | 1 | Frames the predictor is asked to produce (only 1 supported). |
 | `batch_size` | **32** (config default) | Images per minibatch (32x4 frames forward+backward). Fits this GPU with the decoder off and `dino_global` (3-token attention). |
-| `epochs` | **10** | **Per launch**, not an absolute total (see resume caveat). |
+| `epochs` | **10** | **Total** epochs this run should reach (`epochs_mode=target`): a resume finishes the run instead of adding 10 more. |
 | `seed` | 0 | RNG seed. |
 | `encoder_lr` | 1e-5 | LR for trainable encoder modules (none here -- see caveat). |
 | `predictor_lr` | 5e-4 | LR for the latent-predictor transformer. |
@@ -207,11 +207,13 @@ GD planning `n_evals=50` ~0.8 GB, CEM planning `num_samples=200` ~0.8 GB -- all 
 
 ## Caveats / gotchas to remember
 
-1. **`EPOCHS=10` is per launch, not an absolute total.** The training loop is
-   `for epoch in range(resumed_epoch + 1, resumed_epoch + 1 + total_epochs)`. Because `run.sh`
-   resumes existing runs (dir already has a checkpoint), re-running it keeps adding 10 epochs
-   (e.g. it showed "epoch 11" when it resumed from epoch 1). Use `FRESH=1` for a clean 10-epoch
-   total.
+1. **`EPOCHS=10` is the total the run should reach** (`training.epochs_mode=target`, the default in
+   `conf/train.yaml`). `train.py` resumes from `model_latest.pth` and stops at epoch 10, so
+   re-running `run.sh` finishes the run instead of adding 10 more epochs. Raise `EPOCHS` to train
+   further, set `training.epochs_mode=additional` for the old per-launch behaviour, or `FRESH=1`
+   to restart from scratch. `run_scripts/run_mpc.sh --status`-style reporting is in the training
+   launcher: `bash run_scripts/train_server.sh status` lists each arm's saved epoch and what is
+   left to do.
 2. **`TRAIN_DECODER=False` removes the planner's decoded videos.** Without a trained decoder the
    checkpoint has no decoder, so the planner runs `has_decoder=False` and the eval skips decoding:
    you still get all numeric metrics (`logs.json`: success rate, state/visual/proprio distances,
@@ -221,7 +223,9 @@ GD planning `n_evals=50` ~0.8 GB, CEM planning `num_samples=200` ~0.8 GB -- all 
    the curvature / two-thirds losses act on the trainable GlobalProjector output. (`encoder=dino` --
    no projector -- makes them inert; that is the paper's no-regularizer baseline.)
 4. **Checkpoint resume**: planning loads `model_latest.pth` (updated at every epoch end), so
-   interrupting training at any point still leaves a usable model for planning.
+   interrupting training at any point still leaves a usable model for planning. Because every
+   epoch also writes `model_<epoch>.pth`, an arm that overshot its target (e.g. under the legacy
+   `epochs_mode=additional`) still has its epoch-10 snapshot for a fair comparison.
 
 ---
 

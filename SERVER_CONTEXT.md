@@ -102,9 +102,8 @@ run below):
 srun \
   --account=torch_pr_718_cds \
   --gres=gpu:1 \
-  --constraint='h200' \
-  --cpus-per-task=48 \
-  --mem=192G \
+  --cpus-per-task=16 \
+  --mem=128G \
   --time=48:00:00 \
   --pty bash
 ```
@@ -311,7 +310,9 @@ Sizing that matters:
 server-local file needs no edits; the launcher's env knobs reach the container
 because apptainer passes the host environment through. A job that hits its time
 limit is safe to resubmit: `train.py` resumes from `checkpoints/model_latest.pth`
-and checkpoints are written at every epoch end (`save_every_x_iterations: 0`).
+and checkpoints are written at every epoch end (`save_every_x_iterations: 0`). With
+the default `epochs_mode=target` the resumed arms stop at `EPOCHS` (no over-training),
+and the launcher skips arms/configs that already finished.
 
 Watch out for:
 
@@ -807,14 +808,14 @@ done
 
 | env var | default | meaning |
 |---|---|---|
-| `EPOCHS` | `20` | **per launch** (paper), see §6 |
+| `EPOCHS` | `20` | target total per arm (paper), see §6 |
 | `BATCH_SIZE` | `32` (global) / `16` (channel) | lower it if the card OOMs |
 | `NUM_HIST` | `3` | paper Table 3 |
 | `NUM_WORKERS` | env yaml (`16`) | 6 parallel jobs × 16 = 96 workers; lower it on a small node |
 | `REG_WINDOW` | untruncated (`num_hist+num_pred`) | P-Reg stats window |
 | `FRESH` | `0` | `1` = delete the 4 run dirs before training |
 | `DRY_RUN` | `0` | `1` = print argvs, train nothing |
-| `SKIP_FINISHED` | `1` | skip an arm whose saved epoch ≥ `EPOCHS` |
+| `SKIP_FINISHED` | `1` | skip an arm that already reached `EPOCHS` (target mode only) |
 | `LINK_RUNS` | `1` | symlink each run dir into `$ART_ROOT` |
 | `CKPT_ROOT` | `$REPO/checkpoints/server` | where run dirs go |
 | `ART_ROOT` | `$REPO/analysis_outputs/server` | symlink farm for downstream artifacts |
@@ -851,11 +852,14 @@ python -c "import torch; print(sorted(torch.load('checkpoints/model_latest.pth',
 ```
 
 **Resume:** if `checkpoints/model_latest.pth` exists, `train.py` loads it automatically
-(weights, optimizers, epoch, mid-epoch batch counter) — there is no flag. Because
-`training.epochs` counts **per launch**, re-running a finished run would train `EPOCHS`
-*more* epochs; that is why the launcher defaults to `SKIP_FINISHED=1`, which skips an
-arm whose saved epoch ≥ `EPOCHS`. Extend a run with `EPOCHS=<saved+N>`, restart it with
-`FRESH=1`.
+(weights, optimizers, epoch, mid-epoch batch counter) -- there is no flag.
+`training.epochs` is the **target total** (`training.epochs_mode=target`, the default): an arm
+saved at epoch 12 with `EPOCHS=20` trains 13..20 and stops, so re-submitting a job that hit its
+wall clock finishes the run instead of adding 20 more epochs. `SKIP_FINISHED=1` (default) skips
+an arm that already reached `EPOCHS`, and grid mode skips whole configs whose four arms are done.
+Check first with `bash run_scripts/train_server.sh status` (or `STATUS=1`), extend an arm with a
+larger `EPOCHS` (e.g. `EPOCHS=25` trains 21..25), and use `FRESH=1` only to restart from scratch.
+`training.epochs_mode=additional` restores the legacy per-launch behaviour.
 
 **Disk:** measured checkpoint sizes here are **0.39 GB** without the decoder and
 **0.57 GB** with it. One epoch writes `model_latest.pth` + `model_<epoch>.pth`, so
