@@ -237,17 +237,20 @@ if [[ "$ENV_SEL" == "all" || "$ENV_SEL" == "grid" ]]; then
     # Fail fast on the classic server mistake: running the launcher on the HOST,
     # outside the container, where `python` is /usr/bin/python and has no torch.
     # Without this, six children start and die one by one with the same message.
-    if ! "$PY" -c 'import torch' >/dev/null 2>&1; then
+    if ! _torch_err="$("$PY" -c 'import torch' 2>&1)"; then
+        echo "FATAL: '$PY' cannot import torch:" >&2
+        printf '%s\n' "$_torch_err" | tail -6 >&2
         if [[ "$DRY_RUN" = "1" ]]; then
-            echo "  WARNING : '$PY' has no torch -- DRY_RUN still prints argvs, a real run will fail." >&2
+            echo "  WARNING : DRY_RUN still prints argvs, a real run will fail." >&2
         else
-            echo "FATAL: interpreter '$PY' cannot import torch." >&2
             echo "       On the server the ts env lives INSIDE the project container. Either submit the" >&2
             echo "       grid (it wraps everything in apptainer):" >&2
             echo "         bash run_scripts/submit_train_grid.sh" >&2
             echo "         sbatch run_scripts/train_server.slurm all all" >&2
             echo "       or enter the container and 'conda activate ts' first (SERVER_CONTEXT.md 4/8)." >&2
-            echo "       Override with PYTHON=/path/to/ts/env/bin/python." >&2
+            echo "       If you sourced an env file that prepends PYTHONPATH or LD_LIBRARY_PATH (MuJoCo /" >&2
+            echo "       planning setup), retry without it: a shadowed or mismatched library breaks torch." >&2
+            echo "       Override the interpreter with PYTHON=/path/to/ts/env/bin/python." >&2
             exit 1
         fi
     fi
