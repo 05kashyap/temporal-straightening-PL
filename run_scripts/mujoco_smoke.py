@@ -97,6 +97,9 @@ def stage_environment():
     print("   %-22s %s" % ("MUJOCO_PY_MUJOCO_PATH/bin",
                            "present" if os.path.isdir(os.path.join(mj, "bin"))
                            else "MISSING"))
+    print("   %-22s %s" % ("python", sys.executable))
+    print("   %-22s %s / %s" % ("sys.prefix / CONDA_PREFIX", sys.prefix,
+                                   os.environ.get("CONDA_PREFIX", "<unset>")))
     return "mujoco=%s MUJOCO_GL=%s" % (mj, os.environ.get("MUJOCO_GL", "<unset>"))
 
 
@@ -120,10 +123,37 @@ def stage_mujoco_py():
 
 
 def stage_load_lib():
-    """Can the dynamic loader find libmujoco210.so at all?"""
+    """Informational: how the loader sees libmujoco210.so.
+
+    A plain ctypes.CDLL("libmujoco210.so") fails on this stack with an undefined
+    symbol for glewBindBuffer: the MuJoCo library references glew symbols that live
+    in the sibling libglewegl.so / libglewosmesa.so, and mujoco_py's cymj extension
+    is what links them. So this is NOT a failure by itself; it is reported together
+    with the LD_PRELOAD that makes it work, because that is the standard fix if the
+    cymj import ever raises the same symbol.
+    """
     import ctypes
-    ctypes.CDLL("libmujoco210.so")
-    return "libmujoco210.so loads"
+    mj = os.environ.get("MUJOCO_PY_MUJOCO_PATH",
+                        os.path.expanduser("~/.mujoco/mujoco210"))
+    try:
+        ctypes.CDLL("libmujoco210.so")
+        return "libmujoco210.so loads directly"
+    except OSError as exc:
+        print("   plain load failed: %s" % str(exc).strip().splitlines()[-1])
+    for name in ("libglewegl.so", "libglewosmesa.so", "libglew.so"):
+        cand = os.path.join(mj, "bin", name)
+        if not os.path.isfile(cand):
+            continue
+        try:
+            ctypes.CDLL(cand, mode=ctypes.RTLD_GLOBAL)
+            ctypes.CDLL("libmujoco210.so")
+            print("   preloading %s makes it load -> if the cymj import fails with"
+                  " an undefined glew symbol, use LD_PRELOAD=%s" % (cand, cand))
+            return "loads with LD_PRELOAD=%s" % cand
+        except OSError:
+            continue
+    raise RuntimeError("libmujoco210.so did not load even with the sibling glew "
+                       "libraries present")
 
 
 def stage_gym_envs():
@@ -220,8 +250,12 @@ def main():
                  "is shadowing conda's libs -> export MUJOCO_LD_MODE=append"])
     check("mujoco_py import (builds cymj on first use)", stage_mujoco_py,
           hints=["a compile error means no compiler/patchelf/GL headers in the env, "
-                 "or the overlay is read-only for this run"])
-    check("libmujoco210.so reachable via the loader", stage_load_lib)
+                 "or the overlay is read-only for this run (the first import "
+                 "writes mujoco_py/generated/)",
+                 "an undefined-symbol error for glewBindBuffer needs "
+                 "LD_PRELOAD=<glew .so> (the loader stage prints which one)"])
+    check("libmujoco210.so loader (informational)", stage_load_lib,
+          required=False)
     check("gym envs registered (import env)", stage_gym_envs)
     check("point_maze make/reset/step", stage_make_env)
     if args.skip_render:

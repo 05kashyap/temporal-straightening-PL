@@ -14,7 +14,7 @@ export DATASET_DIR="${DATASET_DIR:-$PWD/data/datasets}"
 # `ts` (an activated env whose directory is named ts) wins over the two known prefixes,
 # so activating another env by accident cannot silently pick the wrong interpreter.
 TS_ENV_PREFIX=""
-for cand in "$HOME/miniconda3/envs/ts" "/opt/miniconda/envs/ts"; do
+for cand in "$HOME/miniconda3/envs/ts" "/opt/conda-envs/ts" "/opt/miniconda/envs/ts"; do
     if [ -x "$cand/bin/python" ]; then TS_ENV_PREFIX="$cand"; break; fi
 done
 if [ -n "${CONDA_PREFIX:-}" ] && [ "$(basename "${CONDA_PREFIX:-}")" = "ts" ]         && [ -x "$CONDA_PREFIX/bin/python" ]; then

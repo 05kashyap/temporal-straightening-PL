@@ -78,7 +78,18 @@ export MUJOCO_GL="\${MUJOCO_GL:-egl}"                 # headless EGL; unset = gl
 export PYOPENGL_PLATFORM="\${PYOPENGL_PLATFORM:-egl}"
 export EGL_GPU="\${EGL_GPU:-0}"                       # PyFleX only; harmless here
 export D4RL_SUPPRESS_IMPORT_ERROR="\${D4RL_SUPPRESS_IMPORT_ERROR:-1}"
-export PYTHON="\${PYTHON:-$CONDA_ENV/bin/python}"     # run_mpc.sh's default is the laptop path
+# PYTHON: discovered at source time. Do not hardcode a prefix -- on NYU Torch the
+# ts env is at /opt/conda-envs/ts (not /opt/miniconda/envs/ts).
+if [ -z "\${PYTHON:-}" ]; then
+    if [ -x "\${CONDA_PREFIX:-}/bin/python" ] && [ "\$(basename \${CONDA_PREFIX:-})" = "ts" ]; then
+        export PYTHON="\$CONDA_PREFIX/bin/python"
+    else
+        for _p in /opt/conda-envs/ts /opt/miniconda/envs/ts "\$HOME/miniconda3/envs/ts"; do
+            if [ -x "\$_p/bin/python" ]; then export PYTHON="\$_p/bin/python"; break; fi
+        done
+        unset _p
+    fi
+fi
 export MUJOCO_LD_MODE="\${MUJOCO_LD_MODE:-$MUJOCO_LD_MODE}"
 
 _mj="\$MUJOCO_PY_MUJOCO_PATH/bin"
@@ -100,7 +111,7 @@ unset _mj _ld _d _old_ifs
 export DATASET_DIR="\${DATASET_DIR:-$DATASET_DIR}"
 EOF
 chmod +x "$ENV_FILE"
-echo "wrote $ENV_FILE   (MUJOCO_LD_MODE=$MUJOCO_LD_MODE, MUJOCO_GL=egl, PYTHON=$CONDA_ENV/bin/python)"
+echo "wrote $ENV_FILE   (MUJOCO_LD_MODE=$MUJOCO_LD_MODE, MUJOCO_GL=egl, PYTHON discovered at source time)"
 
 # --- run the smoke test inside the container ---------------------------------
 # --bind home: apptainer binds the *current working directory* by default, so the repo
@@ -126,6 +137,8 @@ if [ "$RUN_SMOKE" = "1" ]; then
         export PATH=/opt/miniconda/bin:\$PATH
         source /opt/miniconda/etc/profile.d/conda.sh
         conda activate ts
+        export PYTHON="$(command -v python)"   # discover, never guess: this container
+        echo "[container] python=$PYTHON"      # has /opt/conda-envs/ts, not /opt/miniconda
         source $ENV_FILE
         cd $REPO_IN_CONTAINER
         export PYTHONPATH=\$PWD\${PYTHONPATH:+:\$PYTHONPATH}

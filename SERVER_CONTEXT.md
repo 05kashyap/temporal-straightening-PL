@@ -1012,6 +1012,19 @@ the build in a gap.
   `bash run_scripts/setup_mujoco_server.sh --skip-render`. The offscreen render (stage 7)
   and the `FULL=0` / `FULL=1` MPC runs need a GPU: use a slurm allocation
   (`srun --gres=gpu:1 ...`, or a job script as in §8) and run the same script there.
+- **Interpreter path**: on this cluster `conda activate ts` lands in
+  **`/opt/conda-envs/ts`** (not `/opt/miniconda/envs/ts`, which does not exist here), so
+  nothing may hardcode a prefix: the driver exports `PYTHON=$(command -v python)` after
+  activating, the generated `~/mujoco_env.sh` discovers it at source time, and
+  `setup.sh` / `run_mpc.sh` probe `CONDA_PREFIX` then `/opt/conda-envs/ts` then
+  `/opt/miniconda/envs/ts` then `~/miniconda3/envs/ts`. `--dry-run` prints what the
+  smoke test will actually run.
+- **glew / `__glewBindBuffer`**: `libmujoco210.so` on its own needs glew symbols that
+  live in `$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so`, and mujoco_py's `cymj` links
+  them itself -- so the smoke test reports that loader check as *information*, not a
+  failure. If the `cymj` import ever fails with an undefined `glewBindBuffer` symbol,
+  prefix `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` (the loader line names
+  the file that works).
 
 ### 11.2 Acceptance test
 
@@ -1020,7 +1033,9 @@ checks in order and prints PASS/FAIL per stage: environment -> `import torch` *w
 MuJoCo paths set* -> `import mujoco_py` (builds cymj) -> `libmujoco210.so` via the
 loader -> `import env` registers point_maze/point_maze_medium/pusht/wall ->
 `gym.make("point_maze")` reset+step -> offscreen render (EGL/GLFW) -> `DATASET_DIR` and
-checkpoint paths (warn only). Exit 0 = the planning stage can run here. Verified on the
+checkpoint paths (warn only). The `libmujoco210.so` loader line is informational (see
+11.1 on glew); the required stages are torch, cymj, env registration, make/step and the
+render. Exit 0 = the planning stage can run here. Verified on the
 laptop in both modes: GLFW `var=1443`, EGL `var=1414` (`Found 4 GPUs for rendering.
 Using device 0`).
 
@@ -1058,6 +1073,10 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | cymj build: `Read-only file system` / `Permission denied` | the overlay was mounted `:ro`; the first import needs it writable |
 | cymj build: `gl.h` / `glew` missing | the conda env lost `glew` / `xorg-libx11` / `xorg-xorgproto` (environment.yaml) |
 | `libmujoco210.so: cannot open shared object file` | `MUJOCO_PY_MUJOCO_PATH` wrong, or its `bin` is not on `LD_LIBRARY_PATH` -> `MUJOCO_LD_MODE=prepend` |
+| `Read-only file system: .../mujoco_py/generated/mujocopy-buildlock` | the run used `--check` (`:ro`); the first import must write there -> run without `--check` in a gap between training jobs |
+| `undefined symbol: __glewBindBuffer` | informational for the standalone loader test (cymj links glew itself). If the *cymj import* raises it: `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` |
+| `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
+| `datasets 0 of 3 found in ...` | `DATASET_DIR` must point at the DINO-WM root that *contains* `point_maze`, `point_maze_medium`, `pusht_noise` -- the generated env file guesses `$SCRATCH/datasets`; override it (`export DATASET_DIR=...` before `run_mpc.sh`) |
 | `glfw`/window error, no DISPLAY | `MUJOCO_GL=egl` + `PYOPENGL_PLATFORM=egl` (auto-set when `DISPLAY` is empty) |
 | `d4rl` warnings about mjrl/flow/carla | harmless; `D4RL_SUPPRESS_IMPORT_ERROR=1` silences them. **No d4rl hdf5 is downloaded** -- the `dataset_url` kwargs are never used (no `get_dataset()` call in the repo) |
 | `plan.py` cannot find data | `DATASET_DIR` must contain `point_maze`, `point_maze_medium`, `pusht_noise` (the generated env file points it at `$SCRATCH/datasets`; override if yours differs) |

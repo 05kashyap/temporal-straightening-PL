@@ -71,7 +71,7 @@ export WANDB_MODE
 # (laptop $HOME/miniconda3, project container /opt/miniconda) -- same probe as setup.sh.
 if [ -z "${PYTHON:-}" ]; then
     PY=""
-    for cand in "$HOME/miniconda3/envs/ts" "/opt/miniconda/envs/ts"; do
+    for cand in "$HOME/miniconda3/envs/ts" "/opt/conda-envs/ts" "/opt/miniconda/envs/ts"; do
         if [ -x "$cand/bin/python" ]; then PY="$cand/bin/python"; break; fi
     done
     if [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python" ]             && { [ "$(basename "$CONDA_PREFIX")" = "ts" ] || [ -z "$PY" ]; }; then
