@@ -1060,6 +1060,28 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `python analysis/div_emb_tables.py` renders those summaries into markdown tables.
 - Slurm: same skeleton as §8 with `--gres=gpu:1 --cpus-per-task=8`; inside the
   `apptainer exec` body add `source ~/mujoco_env.sh` before `bash run_scripts/run_mpc.sh`.
+- **Arm names are per-machine.** The four `MODELS` per env inside `run_mpc.sh` are the
+  dev machine's run-dir names. The checkpoints trained *on this cluster* use different
+  recipes, so pass `--ckpt <one run dir>` per arm, or all four at once via `ARM_NAMES`
+  (index-aligned with `all|False|straighten|twothirds|both`):
+
+  ```bash
+  ARM_NAMES="umaze_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06 \
+             umaze_aggcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05 \
+             umaze_ttaggtwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05 \
+             umaze_aggcos1e-1_aggtwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05" \
+  bash run_scripts/run_mpc.sh umaze all gd_mpc --ckpt "$CKPT_ROOT/test" --seeds 100
+  ```
+
+  A name that does not exist under `CKBPT` now aborts with the list of arm dirs that **do**
+  exist for that env, so the fix is one line instead of a guess.
+- **Datasets**: `DATASET_DIR` must be the parent of `point_maze/`, `point_maze_medium/`,
+  `pusht_noise/`, and each of those must directly contain `states.pth`, `actions.pth`,
+  `seq_lengths.pth` (pusht: `seq_lengths.pkl` + `rel_actions.pth`/`abs_actions.pth`) and an
+  `obses/` directory. On this cluster the files sit one level deeper than the directory
+  name suggests (`/scratch/akn7847/datasets/worldmodeldata/point_maze/point_maze`), so the
+  value to use is `export DATASET_DIR=/scratch/akn7847/datasets/worldmodeldata/point_maze`
+  -- the smoke test detects that nesting and prints the exact line to run.
 - Mount flags for a planning job: `--bind "$HOME:$HOME"` (so `~/mujoco_env.sh` is
   readable) and `--overlay "$OVERLAY:ro"`. Planning only *reads* the overlay, so a
   read-only mount is safe and avoids fighting a training job that holds it read-write;

@@ -259,6 +259,19 @@ case "$ENV_SEL" in
         exit 1
         ;;
 esac
+# The four MODELS above are the dev machine's run-dir names. On another machine, or
+# after retraining with a different recipe, override them -- index-aligned with the
+# variants all|False|straighten|twothirds|both:
+#   ARM_NAMES="baseline straighten p_reg both" bash run_mpc.sh <env> all both ...
+if [ -n "${ARM_NAMES:-}" ]; then
+    read -r -a _arm_names <<< "$ARM_NAMES"
+    if [ "${#_arm_names[@]}" -ne 4 ]; then
+        echo "ARM_NAMES needs 4 space-separated run-dir names (baseline straighten p_reg both), got ${#_arm_names[@]}" >&2
+        exit 1
+    fi
+    MODELS=("${_arm_names[@]}")
+    unset _arm_names
+fi
 # --- variant / planner selection ---------------------------------------------
 case "$VARIANT" in
     all)        IDX=(0 1 2 3) ;;
@@ -341,6 +354,33 @@ ckpt_full() {  # $1 = model run dir name (unused in direct-checkpoint mode)
         if [[ "$CKBPT" = /* ]]; then echo "$CKBPT/$1"; else echo "$PWD/$CKBPT/$1"; fi
     fi
 }
+# Preflight (run-dir mode): every selected arm must exist under CKBPT. When one does
+# not, list the arm dirs that DO exist for this env, so the fix is one ARM_NAMES line
+# instead of a guess (a retrained machine has different names, e.g. projwhich vs
+# projchannel, or tttwothirds vs ttaggtwothirds).
+if [ "$DIRECT_CKBPT" != "1" ]; then
+    _missing=()
+    for _i in "${IDX[@]}"; do
+        [ -d "$(ckpt_full "${MODELS[$_i]}")" ] || _missing+=("${MODELS[$_i]}")
+    done
+    if [ "${#_missing[@]}" -gt 0 ]; then
+        echo "FATAL: ${#_missing[@]} selected arm(s) have no run dir under CKBPT=$CKBPT:" >&2
+        for _mm in "${_missing[@]}"; do echo "  missing: $_mm" >&2; done
+        _root="$CKBPT"; case "$_root" in /*) ;; *) _root="$PWD/$_root" ;; esac
+        echo "  arm dirs that DO exist for env $ENV_SEL:" >&2
+        _n=0
+        for _d in "$_root"/${ENV_SEL}_*; do
+            [ -d "$_d" ] || continue
+            _n=$(( _n + 1 ))
+            echo "    $(basename "$_d")" >&2
+        done
+        [ "$_n" -eq 0 ] && echo "    (none found -- is --ckpt pointing at the right dir?)" >&2
+        echo "  fix: pass the four names in variant order (baseline straighten p_reg both):" >&2
+        echo "    ARM_NAMES='<0> <1> <2> <3>' bash $0 $ENV_SEL all ..." >&2
+        exit 1
+    fi
+    unset _missing _i _root _d _n _mm
+fi
 
 run_plan() {  # $1 planner, $2 model, $3 run.dir, $4 n_evals, $5 max_iter, $6... extra args
     local planner="$1" model="$2" rundir="$3" n_evals="$4" max_iter="$5"; shift 5

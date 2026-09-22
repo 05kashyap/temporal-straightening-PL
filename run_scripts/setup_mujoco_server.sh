@@ -137,8 +137,7 @@ if [ "$RUN_SMOKE" = "1" ]; then
         export PATH=/opt/miniconda/bin:\$PATH
         source /opt/miniconda/etc/profile.d/conda.sh
         conda activate ts
-        export PYTHON="$(command -v python)"   # discover, never guess: this container
-        echo "[container] python=$PYTHON"      # has /opt/conda-envs/ts, not /opt/miniconda
+        export PYTHON=\$(command -v python)   # discovered inside the container
         source $ENV_FILE
         cd $REPO_IN_CONTAINER
         export PYTHONPATH=\$PWD\${PYTHONPATH:+:\$PYTHONPATH}

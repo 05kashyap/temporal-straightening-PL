@@ -206,32 +206,81 @@ def stage_render():
     return "offscreen render %s via %s" % (img.shape, mode)
 
 
+DATA_REQUIRED = {                       # what each loader reads (datasets/*_dset.py)
+    "point_maze": ["states.pth", "actions.pth", "seq_lengths.pth"],
+    "point_maze_medium": ["states.pth", "actions.pth", "seq_lengths.pth"],
+    "pusht_noise": ["states.pth", "seq_lengths.pkl"],
+}
+DATA_ANY_OF = {"pusht_noise": ["rel_actions.pth", "abs_actions.pth"]}
+DATA_DIRS = ["obses"]
+
+
+def _dataset_ok(path):
+    """True when `path` is the directory the dataset loader actually reads."""
+    for name in DATA_REQUIRED.get(_dataset_ok.env, []):
+        if not os.path.isfile(os.path.join(path, name)):
+            return False
+    any_of = DATA_ANY_OF.get(_dataset_ok.env, [])
+    if any_of and not any(os.path.isfile(os.path.join(path, n)) for n in any_of):
+        return False
+    return all(os.path.isdir(os.path.join(path, d)) for d in DATA_DIRS)
+
+
 def stage_planning_inputs():
-    """Warn-only: what a real plan.py run still needs."""
+    """Warn-only: what a real plan.py run still needs (datasets + checkpoints).
+
+    Checks the *layout*, not just the directory names: plan.py reads
+    `$DATASET_DIR/<env>` via datasets/*_dset.py, which loads states.pth etc. and an
+    obses/ directory (pusht additionally rel_actions.pth|abs_actions.pth and
+    seq_lengths.pkl). A dataset unpacked one level too deep (…/point_maze/point_maze)
+    is detected and the exact DATASET_DIR to export is printed.
+    """
     missing = []
     dset = os.environ.get("DATASET_DIR")
-    wants = ("point_maze", "point_maze_medium", "pusht_noise")
+    envs = ("point_maze", "point_maze_medium", "pusht_noise")
     if not dset:
-        missing.append("DATASET_DIR is unset (plan.py reads $DATASET_DIR/point_maze, "
-                       ".../point_maze_medium, .../pusht_noise)")
+        missing.append("DATASET_DIR is unset (plan.py reads $DATASET_DIR/<env>)")
     elif not os.path.isdir(dset):
         missing.append("DATASET_DIR=%s does not exist" % dset)
     else:
-        have = [d for d in wants if os.path.isdir(os.path.join(dset, d))]
-        print("   datasets     %d of %d found in %s" % (len(have), len(wants), dset))
-        if len(have) < len(wants):
-            missing.append("missing dataset dirs under DATASET_DIR: %s"
-                           % ", ".join(d for d in wants if d not in have))
+        print("   DATASET_DIR  %s" % dset)
+        for env_name in envs:
+            _dataset_ok.env = env_name
+            cand = os.path.join(dset, env_name)
+            if _dataset_ok(cand):
+                print("   %-18s ok" % env_name)
+                continue
+            deeper = os.path.join(cand, env_name)
+            if _dataset_ok(deeper):
+                print("   %-18s one level deeper -> %s" % (env_name, deeper))
+                missing.append("%s is at %s, so export DATASET_DIR=%s"
+                               % (env_name, deeper, cand))
+            elif os.path.isdir(cand):
+                wanted = ", ".join(DATA_REQUIRED[env_name] + DATA_DIRS)
+                have = sorted(os.listdir(cand))[:6]
+                print("   %-18s present but incomplete: %s" % (env_name, cand))
+                missing.append("%s has no %s (found: %s)"
+                               % (env_name, wanted, ", ".join(have)))
+            else:
+                print("   %-18s MISSING" % env_name)
+                missing.append("%s not found under %s" % (env_name, dset))
     ckpt = os.environ.get("CKBPT") or "checkpoints/test"
-    if not os.path.exists(ckpt):
-        missing.append("no checkpoints at %s (run_mpc.sh defaults to the laptop "
+    if not os.path.isdir(ckpt):
+        missing.append("no checkpoint dir at %s (run_mpc.sh defaults to the laptop "
                        "path checkpoints/test -- pass --ckpt $CKPT_ROOT/test)" % ckpt)
     else:
-        print("   checkpoints  %s" % ckpt)
+        arms = sorted(d for d in os.listdir(ckpt)
+                      if os.path.isdir(os.path.join(ckpt, d)))
+        ready = [d for d in arms
+                 if os.path.isfile(os.path.join(ckpt, d, "checkpoints", "model_latest.pth"))]
+        print("   checkpoints  %s: %d arm dirs, %d with model_latest.pth"
+              % (ckpt, len(arms), len(ready)))
+        if not ready:
+            missing.append("no <run dir>/checkpoints/model_latest.pth under %s" % ckpt)
     for m in missing:
-        print("   cd /home/kashyap/Documents/Projects/temporal-straightening-PL && { wc -l run_scripts/mujoco_smoke.py; echo '--- last lines ---'; tail -4 run_scripts/mujoco_smoke.py; echo '--- compile ---'; python3 -m py_compile run_scripts/mujoco_smoke.py && echo COMPILE_OK || echo COMPILE_FAIL; } > /tmp/ms_check.txt 2>&1; cat /tmp/ms_check.txt %s" % m)
+        print("   !! %s" % m)
     return ("warnings: %d" % len(missing)) if missing \
-        else "DATASET_DIR and checkpoints present"
+        else "datasets and checkpoints look right"
 
 
 def main():
