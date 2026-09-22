@@ -67,7 +67,32 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_MODE
-PY="${PYTHON:-$HOME/miniconda3/envs/ts/bin/python}"
+# Interpreter: PYTHON=... wins, then an activated env, then the two known prefixes
+# (laptop $HOME/miniconda3, project container /opt/miniconda) -- same probe as setup.sh.
+if [ -z "${PYTHON:-}" ]; then
+    PY=""
+    for cand in "$HOME/miniconda3/envs/ts" "/opt/miniconda/envs/ts"; do
+        if [ -x "$cand/bin/python" ]; then PY="$cand/bin/python"; break; fi
+    done
+    if [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python" ]             && { [ "$(basename "$CONDA_PREFIX")" = "ts" ] || [ -z "$PY" ]; }; then
+        PY="$CONDA_PREFIX/bin/python"
+    fi
+else
+    PY="$PYTHON"
+fi
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+    echo "FATAL: no ts interpreter found -- set PYTHON=/path/to/envs/ts/bin/python" >&2
+    exit 1
+fi
+# Planning needs BOTH torch and the simulator, so check torch here: a broken environment
+# then fails immediately with the real traceback instead of deep inside plan.py.
+if ! _torch_err="$("$PY" -c 'import torch' 2>&1)"; then
+    echo "FATAL: '$PY' cannot import torch:" >&2
+    printf '%s\n' "$_torch_err" | tail -6 >&2
+    echo "       If you sourced a MuJoCo env file that PREPENDS LD_LIBRARY_PATH, retry" >&2
+    echo "       with MUJOCO_LD_MODE=append (see run_scripts/setup.sh)." >&2
+    exit 1
+fi
 
 usage() {
     echo "usage: bash run_mpc.sh <env> [variant] [planner] [--ckpt PATH] [--seeds \"100 101 102\"]"

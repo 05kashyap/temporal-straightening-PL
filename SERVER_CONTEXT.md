@@ -958,3 +958,92 @@ When something looks off: the run dir's `hydra.yaml` plus its
 
 
 
+
+---
+
+## 11. MPC / planning stage (MuJoCo + EGL)
+
+Training needs none of this. `plan.py` / `run_mpc.sh` do, because the point-maze envs
+are MuJoCo gym envs:
+
+```
+plan.py -> gym.make("point_maze")            (env/__init__.py)
+        -> env.pointmaze.PointMazeWrapper
+        -> env/pointmaze/maze_model.py: from gym.envs.mujoco import mujoco_env
+        -> mujoco_py -> the MuJoCo 2.1.2 binaries in $MUJOCO_PY_MUJOCO_PATH
+```
+
+`train_server.sh` deliberately sources none of this, and **do not source
+`~/mujoco_env.sh` before a training run**: it adds the MuJoCo libs to `LD_LIBRARY_PATH`,
+and *prepending* them ahead of the conda libs is the suspected cause of the
+`cannot import torch` failure seen in the resume job (§7). Use `MUJOCO_LD_MODE=append`
+(default in `~/mujoco_env.sh`, supported by `run_scripts/setup.sh`) so the MuJoCo dirs
+end up last.
+
+### 11.1 One-time setup (do it in a gap between training jobs)
+
+```bash
+# MuJoCo 2.1.2 (mujoco210) under ~/.mujoco -- one-time download:
+mkdir -p "$HOME/.mujoco"
+wget https://mujoco.org/download/mujoco210-linux-x86_64.tar.gz -P "$HOME/.mujoco"
+tar -xzf "$HOME/.mujoco/mujoco210-linux-x86_64.tar.gz" -C "$HOME/.mujoco"
+ls "$HOME/.mujoco/mujoco210/bin"          # libmujoco210.so + libglew{egl,osmesa}.so
+
+# writes ~/mujoco_env.sh, builds mujoco_py's cymj, runs the acceptance test
+bash run_scripts/setup_mujoco_server.sh
+```
+
+- The first `import mujoco_py` compiles its `cymj` extension into site-packages *inside
+the overlay*, so that step needs `--overlay "$OVERLAY"` (writable). A running training
+job holds the overlay read-write; run with `--check` (read-only) once cymj exists, or do
+the build in a gap.
+- Exporting `MUJOCO_PY_MUJOCO_PATH` in one interactive shell is not enough: the
+  generated `~/mujoco_env.sh` sets it, plus `MUJOCO_GL=egl`, `PYOPENGL_PLATFORM=egl`,
+  `D4RL_SUPPRESS_IMPORT_ERROR=1`, `PYTHON=/opt/miniconda/envs/ts/bin/python` and an
+  idempotent `LD_LIBRARY_PATH` for every planning process.
+
+### 11.2 Acceptance test
+
+`python run_scripts/mujoco_smoke.py` (inside the container, planning env sourced)
+checks in order and prints PASS/FAIL per stage: environment -> `import torch` *with the
+MuJoCo paths set* -> `import mujoco_py` (builds cymj) -> `libmujoco210.so` via the
+loader -> `import env` registers point_maze/point_maze_medium/pusht/wall ->
+`gym.make("point_maze")` reset+step -> offscreen render (EGL/GLFW) -> `DATASET_DIR` and
+checkpoint paths (warn only). Exit 0 = the planning stage can run here. Verified on the
+laptop in both modes: GLFW `var=1443`, EGL `var=1414` (`Found 4 GPUs for rendering.
+Using device 0`).
+
+### 11.3 Running MPC
+
+```bash
+source ~/mujoco_env.sh
+export PYTHONPATH="$PWD"                       # run_mpc.sh does this too
+
+FULL=0 bash run_scripts/run_mpc.sh umaze False gd_mpc --ckpt "$CKPT_ROOT/test" --seeds 100
+FULL=1 bash run_scripts/run_mpc.sh umaze False gd_mpc --ckpt "$CKPT_ROOT/test" --seeds 100
+FULL=1 bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"           # 4 arms x 2 planners
+OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"           # open loop
+```
+
+- `FULL=0` is `run_mpc.sh`'s validation mode: OOM check + runtime estimate. Run it first.
+- `CKBPT` defaults to the laptop path `checkpoints/test`; on the server pass
+  `--ckpt $CKPT_ROOT/test` (a directory of arm run dirs, each with
+  `checkpoints/model_latest.pth`).
+- Outputs: `plan_outputs_gd_mpc/<model>_s<seed>_gH25/` + `summaries/<model>_gH25.json`;
+  open loop goes to `plan_outputs_gd_ol/` so the closed-loop logs are never overwritten.
+  `python analysis/div_emb_tables.py` renders those summaries into markdown tables.
+- Slurm: same skeleton as §8 with `--gres=gpu:1 --cpus-per-task=8`; inside the
+  `apptainer exec` body add `source ~/mujoco_env.sh` before `bash run_scripts/run_mpc.sh`.
+
+### 11.4 Failure -> fix
+
+| symptom | cause / fix |
+|---|---|
+| `cannot import torch` after sourcing a MuJoCo env file | MuJoCo libs ahead of conda's in `LD_LIBRARY_PATH` -> `MUJOCO_LD_MODE=append` |
+| cymj build: `Read-only file system` / `Permission denied` | the overlay was mounted `:ro`; the first import needs it writable |
+| cymj build: `gl.h` / `glew` missing | the conda env lost `glew` / `xorg-libx11` / `xorg-xorgproto` (environment.yaml) |
+| `libmujoco210.so: cannot open shared object file` | `MUJOCO_PY_MUJOCO_PATH` wrong, or its `bin` is not on `LD_LIBRARY_PATH` -> `MUJOCO_LD_MODE=prepend` |
+| `glfw`/window error, no DISPLAY | `MUJOCO_GL=egl` + `PYOPENGL_PLATFORM=egl` (auto-set when `DISPLAY` is empty) |
+| `d4rl` warnings about mjrl/flow/carla | harmless; `D4RL_SUPPRESS_IMPORT_ERROR=1` silences them. **No d4rl hdf5 is downloaded** -- the `dataset_url` kwargs are never used (no `get_dataset()` call in the repo) |
+| `plan.py` cannot find data | `DATASET_DIR` must contain `point_maze`, `point_maze_medium`, `pusht_noise` (the generated env file points it at `$SCRATCH/datasets`; override if yours differs) |
+| `no ts interpreter found` | export `PYTHON=/opt/miniconda/envs/ts/bin/python`; `setup.sh` / `run_mpc.sh` now probe the container prefix too |
