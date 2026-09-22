@@ -1001,6 +1001,17 @@ the build in a gap.
   generated `~/mujoco_env.sh` sets it, plus `MUJOCO_GL=egl`, `PYOPENGL_PLATFORM=egl`,
   `D4RL_SUPPRESS_IMPORT_ERROR=1`, `PYTHON=/opt/miniconda/envs/ts/bin/python` and an
   idempotent `LD_LIBRARY_PATH` for every planning process.
+- **Home directory / mounts**: apptainer binds only the *current working directory* by
+  default, so the repo is visible inside the container while a file written next to it
+  (`~/mujoco_env.sh`) is **not** -- sourcing it fails with `No such file or directory`.
+  The script therefore runs with `--bind "$HOME:$HOME"`; add the same flag to your own
+  interactive / slurm container runs. `--dry-run` prints the exact `apptainer` command
+  and the in-container script without executing anything.
+- **Login node vs GPU allocation**: the cymj build and smoke stages 1-6 are CPU-only, so
+  they can run on a login node (`--skip-render` also skips the render stage):
+  `bash run_scripts/setup_mujoco_server.sh --skip-render`. The offscreen render (stage 7)
+  and the `FULL=0` / `FULL=1` MPC runs need a GPU: use a slurm allocation
+  (`srun --gres=gpu:1 ...`, or a job script as in §8) and run the same script there.
 
 ### 11.2 Acceptance test
 
@@ -1034,6 +1045,10 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `python analysis/div_emb_tables.py` renders those summaries into markdown tables.
 - Slurm: same skeleton as §8 with `--gres=gpu:1 --cpus-per-task=8`; inside the
   `apptainer exec` body add `source ~/mujoco_env.sh` before `bash run_scripts/run_mpc.sh`.
+- Mount flags for a planning job: `--bind "$HOME:$HOME"` (so `~/mujoco_env.sh` is
+  readable) and `--overlay "$OVERLAY:ro"`. Planning only *reads* the overlay, so a
+  read-only mount is safe and avoids fighting a training job that holds it read-write;
+  only the one-time cymj build needs write access.
 
 ### 11.4 Failure -> fix
 

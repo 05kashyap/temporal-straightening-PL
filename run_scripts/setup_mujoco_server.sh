@@ -36,10 +36,14 @@ DATASET_DIR="${DATASET_DIR:-$SCRATCH/datasets}"
 
 CHECK_ONLY=0
 RUN_SMOKE=1
+DRY_RUN=0
+SMOKE_ARGS=""
 for arg in "$@"; do
     case "$arg" in
-        --check)    CHECK_ONLY=1 ;;
-        --no-smoke) RUN_SMOKE=0 ;;
+        --check)       CHECK_ONLY=1 ;;
+        --no-smoke)    RUN_SMOKE=0 ;;
+        --dry-run)     DRY_RUN=1 ;;
+        --skip-render) SMOKE_ARGS="--skip-render" ;;
         -h|--help)  sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "unknown flag: $arg" >&2; exit 2 ;;
     esac
@@ -99,9 +103,13 @@ chmod +x "$ENV_FILE"
 echo "wrote $ENV_FILE   (MUJOCO_LD_MODE=$MUJOCO_LD_MODE, MUJOCO_GL=egl, PYTHON=$CONDA_ENV/bin/python)"
 
 # --- run the smoke test inside the container ---------------------------------
-MOUNT=(--fakeroot --nv --overlay "$OVERLAY")
+# --bind home: apptainer binds the *current working directory* by default, so the repo
+# is visible inside the container while a file written next to it (such as
+# ~/mujoco_env.sh) is NOT, and sourcing it fails with "No such file or directory".
+# Add the same flag to your own interactive / slurm container runs.
+MOUNT=(--fakeroot --nv --bind "$HOME:$HOME" --overlay "$OVERLAY")
 if [ "$CHECK_ONLY" = "1" ]; then
-    MOUNT=(--fakeroot --nv --overlay "$OVERLAY:ro")
+    MOUNT=(--fakeroot --nv --bind "$HOME:$HOME" --overlay "$OVERLAY:ro")
     echo "  (--check: read-only overlay, so no cymj build -- works once it is built)"
 fi
 
@@ -112,8 +120,9 @@ echo "=== env file  : $ENV_FILE"
 echo "=== repo      : $REPO_IN_CONTAINER"
 if [ "$RUN_SMOKE" = "1" ]; then
     set +e
-    apptainer exec "${MOUNT[@]}" "$SIF" bash -lc "
+    CONTAINER_SCRIPT="
         set -euo pipefail
+        [ -r "$ENV_FILE" ] || { echo 'FATAL: the env file is not visible inside the container: mount your home dir with --bind (SERVER_CONTEXT 11.1)' >&2; exit 9; }
         export PATH=/opt/miniconda/bin:\$PATH
         source /opt/miniconda/etc/profile.d/conda.sh
         conda activate ts
@@ -121,8 +130,14 @@ if [ "$RUN_SMOKE" = "1" ]; then
         cd $REPO_IN_CONTAINER
         export PYTHONPATH=\$PWD\${PYTHONPATH:+:\$PYTHONPATH}
         python -c 'import sys; print(\"[container] python\", sys.executable)'
-        python run_scripts/mujoco_smoke.py
+        python run_scripts/mujoco_smoke.py $SMOKE_ARGS
     "
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "--dry-run: apptainer exec ${MOUNT[*]} $SIF bash -lc <script below>"
+        printf '%s\n' "$CONTAINER_SCRIPT"
+        exit 0
+    fi
+    apptainer exec "${MOUNT[@]}" "$SIF" bash -lc "$CONTAINER_SCRIPT"
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -139,6 +154,8 @@ cat <<EOF
 next: the planning / MPC stage can run here. Validation pass, then the real MPC:
 
   source $ENV_FILE                 # planning-only env (MuJoCo + EGL)
+  # in YOUR OWN container runs, bind your home so that file is visible:
+  #   apptainer exec --fakeroot --nv --bind $HOME:$HOME --overlay $OVERLAY $SIF bash -lc '...'
   cd $REPO_IN_CONTAINER
   export PYTHONPATH=\$PWD
   FULL=0 bash run_scripts/run_mpc.sh umaze False gd_mpc --ckpt $CKPT_ROOT/test --seeds 100
