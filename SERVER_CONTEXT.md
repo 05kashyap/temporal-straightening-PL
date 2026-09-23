@@ -1116,11 +1116,30 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `run_mpc.sh` derives `DATASET_DIR` per env from `DATA_ROOT` itself (printing
   `data: DATASET_DIR=...` in its header). Override `DATA_ROOT=` on the command line or
   pass `--data-root=DIR` to the driver. `ARM_NAMES` / `--arms-from-ckpt` remains the
-  only per-cluster input for MPC (these checkpoints use `projchannel`/`ttagg…`/
+  per-cluster input for MPC can be omitted entirely (these checkpoints use `projchannel`/`ttagg…`/
   `aggflatten` names rather than the built-in dev names).
 - Recovery: if `import mujoco_py` ever regresses, run
   `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` (Cython pin + patch +
   clean rebuild in one command).
+- **Slurm wrapper**: `run_scripts/mpc_server.sh` is sbatch-able (`sbatch
+  run_scripts/mpc_server.sh`; the `.slurm` extension is gitignored, hence the `.sh` name).
+  It runs the jobs sequentially inside one GPU allocation, tees each into
+  `$CKPT_ROOT/logs/mpc_<env>_<variant>_<planner>.log`, runs `mujoco_smoke.py` as a
+  preflight (`PREFLIGHT=1`), prints a success-rate summary, and needs no exports:
+
+  ```bash
+  sbatch run_scripts/mpc_server.sh                        # default: 3 envs x gd_mpc, all arms
+  sbatch run_scripts/mpc_server.sh umaze all both         # env variant planner
+  FULL=0 sbatch run_scripts/mpc_server.sh                 # validation (OOM + estimate)
+  OL=1   sbatch run_scripts/mpc_server.sh                 # open loop
+  JOBS="umaze:all:gd_mpc medium:both:both" sbatch run_scripts/mpc_server.sh
+  ```
+
+  `DRY_RUN=1 bash run_scripts/mpc_server.sh` prints the apptainer command and the
+  generated in-container body without running anything. `OVERLAY_RW=1` only if cymj
+  still has to be compiled. Arm names are **discovered per env** by `run_mpc.sh`
+  (token match: `_False_`, `cos`, two-thirds, both) with an abort-and-list on
+  ambiguity, so the MPC grid no longer needs `ARM_NAMES` at all.
 
 ### 11.4 Failure -> fix
 

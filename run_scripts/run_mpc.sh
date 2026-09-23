@@ -273,6 +273,7 @@ if [ -n "${ARM_NAMES:-}" ]; then
         exit 1
     fi
     MODELS=("${_arm_names[@]}")
+    _arms_explicit=1
     unset _arm_names
 fi
 # Datasets: plan.py reads $DATASET_DIR/<env> and the three datasets are nested
@@ -368,32 +369,72 @@ ckpt_full() {  # $1 = model run dir name (unused in direct-checkpoint mode)
         if [[ "$CKBPT" = /* ]]; then echo "$CKBPT/$1"; else echo "$PWD/$CKBPT/$1"; fi
     fi
 }
-# Preflight (run-dir mode): every selected arm must exist under CKBPT. When one does
-# not, list the arm dirs that DO exist for this env, so the fix is one ARM_NAMES line
-# instead of a guess (a retrained machine has different names, e.g. projwhich vs
-# projchannel, or tttwothirds vs ttaggtwothirds).
+# Preflight (run-dir mode): resolve the four arm names. The built-in MODELS above are the
+# dev machine's run-dir names; on a machine retrained with different recipes
+# (projchannel instead of projglobal, ttaggtwothirds, aggflatten, ...) they are absent, so
+# the four arms are DISCOVERED among ${ENV_SEL}_* by token:
+#   baseline   _False_
+#   straighten cos, without two-thirds
+#   p_reg      two-thirds (twothirds / wothirds), without cos
+#   both       cos AND two-thirds
+# An arm with zero or several candidates aborts and prints them -- a wrong mapping must
+# never be silently averaged into a table. ARM_NAMES=... (above) skips all of this.
+_count_words() { set -- $1; echo "$#"; }
 if [ "$DIRECT_CKBPT" != "1" ]; then
+    _root="$CKBPT"; case "$_root" in /*) ;; *) _root="$PWD/$_root" ;; esac
     _missing=()
     for _i in "${IDX[@]}"; do
-        [ -d "$(ckpt_full "${MODELS[$_i]}")" ] || _missing+=("${MODELS[$_i]}")
+        [ -d "$_root/${MODELS[$_i]}" ] || _missing+=("${MODELS[$_i]}")
     done
-    if [ "${#_missing[@]}" -gt 0 ]; then
+    if [ "${#_missing[@]}" -gt 0 ] && [ -z "${_arms_explicit:-}" ]; then
+        _base=""; _str=""; _preg=""; _both=""
+        for _d in "$_root"/${ENV_SEL}_*; do
+            [ -d "$_d" ] || continue
+            _c="$(basename "$_d")"
+            _cos=0; _tt=0
+            case "$_c" in *cos*) _cos=1 ;; esac
+            case "$_c" in *wothirds*|*twothirds*) _tt=1 ;; esac
+            if [ "$_cos" = "1" ] && [ "$_tt" = "1" ]; then _both="${_both:+$_both }$_c"
+            elif [ "$_cos" = "1" ]; then _str="${_str:+$_str }$_c"
+            elif [ "$_tt" = "1" ]; then _preg="${_preg:+$_preg }$_c"
+            else case "$_c" in *_False_*) _base="${_base:+$_base }$_c" ;; esac
+            fi
+        done
+        _ok=1
+        for _pair in "baseline=$_base" "straighten=$_str" "p_reg=$_preg" "both=$_both"; do
+            _nm="${_pair%%=*}"; _val="${_pair#*=}"
+            if [ "$(_count_words "$_val")" -ne 1 ]; then
+                echo "FATAL: cannot resolve arm '$_nm' under $_root (candidates: ${_val:-<none>})" >&2
+                _ok=0
+            fi
+        done
+        if [ "$_ok" != "1" ]; then
+            echo "  arm dirs present for env $ENV_SEL:" >&2
+            for _d in "$_root"/${ENV_SEL}_*; do [ -d "$_d" ] && echo "    $(basename "$_d")" >&2; done
+            echo "  fix: give the four names explicitly, in variant order (baseline straighten p_reg both):" >&2
+            echo "    ARM_NAMES='<0> <1> <2> <3>' bash $0 $ENV_SEL all ..." >&2
+            exit 1
+        fi
+        MODELS=("$_base" "$_str" "$_preg" "$_both")
+        echo "=== arms for $ENV_SEL (discovered under $CKBPT):"
+        echo "      baseline=$_base"
+        echo "      straighten=$_str"
+        echo "      p_reg=$_preg"
+        echo "      both=$_both"
+    elif [ "${#_missing[@]}" -gt 0 ]; then
         echo "FATAL: ${#_missing[@]} selected arm(s) have no run dir under CKBPT=$CKBPT:" >&2
         for _mm in "${_missing[@]}"; do echo "  missing: $_mm" >&2; done
-        _root="$CKBPT"; case "$_root" in /*) ;; *) _root="$PWD/$_root" ;; esac
-        echo "  arm dirs that DO exist for env $ENV_SEL:" >&2
         _n=0
         for _d in "$_root"/${ENV_SEL}_*; do
             [ -d "$_d" ] || continue
-            _n=$(( _n + 1 ))
-            echo "    $(basename "$_d")" >&2
+            _n=$(( _n + 1 )); echo "  present: $(basename "$_d")" >&2
         done
-        [ "$_n" -eq 0 ] && echo "    (none found -- is --ckpt pointing at the right dir?)" >&2
-        echo "  fix: pass the four names in variant order (baseline straighten p_reg both):" >&2
+        [ "$_n" -eq 0 ] && echo "  (no ${ENV_SEL}_* dirs -- is --ckpt pointing at the right place?)" >&2
+        echo "  fix: four names in variant order (baseline straighten p_reg both), e.g." >&2
         echo "    ARM_NAMES='<0> <1> <2> <3>' bash $0 $ENV_SEL all ..." >&2
         exit 1
     fi
-    unset _missing _i _root _d _n _mm
+    unset _missing _i _root _d _n _mm _c _cos _tt _ok _pair _nm _val _base _str _preg _both || true
 fi
 
 run_plan() {  # $1 planner, $2 model, $3 run.dir, $4 n_evals, $5 max_iter, $6... extra args
@@ -463,6 +504,19 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
 # --- run ----------------------------------------------------------------------
 echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL OL=$OL ==="
 echo "=== data: DATASET_DIR=$DATASET_DIR  (DATA_ROOT=${DATA_ROOT:-<default>}) ==="
+if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "--- DRY_RUN: resolved configuration (nothing is run) ---"
+    for _i in "${IDX[@]}"; do
+        for _pl in "${PLANNERS[@]}"; do
+            echo "  env=$ENV_SEL variant=$VARIANT arm=${MODELS[$_i]} planner=$_pl"
+            echo "      seeds=$SEEDS FULL=$FULL OL=$OL n_evals=$FULL_N_EVALS max_iter=$FULL_MAX_ITER"
+            echo "      ckpt=$CKBPT DATASET_DIR=$DATASET_DIR"
+        done
+    done
+    echo "DRY_RUN=1: printed the plan, ran nothing."
+    unset _i _pl
+    exit 0
+fi
 if [ "$DIRECT_CKBPT" = "1" ]; then
     echo "direct-checkpoint mode: running MPC on $CKBPT"
     model="$(basename "$CKBPT")"
