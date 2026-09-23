@@ -104,7 +104,7 @@ fail=""
 for job in $JOBS; do
     env_sel="${job%%:*}"; rest="${job#*:}"
     variant="${rest%%:*}"; planner="${rest#*:}"
-    log="$log_dir/mpc_${env_sel}_${variant}_${planner}.log"
+    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
     echo
 echo "---- $(date '+%F %H:%M:%S') $env_sel / $variant / $planner -> $log ----"
     if FULL="$FULL" OL="$OL" SEEDS="$SEEDS" \
@@ -122,7 +122,7 @@ echo "==================== summary ===================="
 for job in $JOBS; do
     env_sel="${job%%:*}"; rest="${job#*:}"
     variant="${rest%%:*}"; planner="${rest#*:}"
-    log="$log_dir/mpc_${env_sel}_${variant}_${planner}.log"
+    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
     sr=$(grep -oE 'success_rate[ =:]+[0-9.]+' "$log" 2>/dev/null | tail -1 | grep -oE '[0-9.]+' || true)
     printf '  %-28s %-9s %-8s success_rate=%s\n' "$env_sel" "$variant" "$planner" "${sr:-<n/a>}"
     echo "      log: $log"
@@ -137,6 +137,7 @@ BODYEOF
   echo "export PREFLIGHT=$(printf '%q' "$PREFLIGHT") JOBS=$(printf '%q' "$JOBS")"
   echo "export CKBPT_PATH=$(printf '%q' "$CKBPT_PATH") CKPT_ROOT=$(printf '%q' "$CKPT_ROOT")"
   echo "export ENV_FILE=$(printf '%q' "${ENV_FILE:-$HOME/mujoco_env.sh}")"
+  echo "export OL_SUFFIX=$(printf '%q' "$([ "$OL" = "1" ] && echo ".ol" || true)")"
 } >> "$BODY"
 chmod +x "$BODY"
 

@@ -1140,6 +1140,12 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   still has to be compiled. Arm names are **discovered per env** by `run_mpc.sh`
   (token match: `_False_`, `cos`, two-thirds, both) with an abort-and-list on
   ambiguity, so the MPC grid no longer needs `ARM_NAMES` at all.
+- The tables find those names too: `analysis/div_emb_tables.py` falls back to the
+  same token-based discovery when the built-in names are absent, so
+  `python3 analysis/div_emb_tables.py` (host python is enough -- it only reads
+  the run dirs) renders the closed-loop section from `plan_outputs_gd_mpc/` and
+  the open-loop one from `plan_outputs_gd_ol/`, naming the run dirs it used in
+  the provenance table.
 
 ### 11.4 Failure -> fix
 

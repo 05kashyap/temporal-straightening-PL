@@ -50,6 +50,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -246,15 +247,95 @@ NOTES = """## Notes
 """
 
 
+# Run-dir prefix per env (mirrors train_server.sh's ENV_SEL naming: point_maze -> umaze,
+# point_maze_medium -> medium, ...). Needed because the built-in MODELS names below are
+# the dev machine's; a machine retrained with different recipes (projchannel instead of
+# projglobal, ttaggtwothirds, aggflatten, ...) has the same four arms under other names.
+ENV_PREFIX = {
+    "point_maze": "umaze",
+    "point_maze_medium": "medium",
+    "pusht": "pusht",
+    "wall": "wall",
+}
+
+
+def _classify_arm(name):
+    """Same token rules as run_mpc.sh's arm discovery."""
+    cos = "cos" in name
+    tt = ("wothirds" in name) or ("twothirds" in name)
+    if cos and tt:
+        return "both"
+    if cos:
+        return "straighten"
+    if tt:
+        return "p_reg"
+    if "_False_" in name:
+        return "baseline"
+    return None
+
+
+def discover_arms(loop_dir, env, goal_h):
+    """Resolve arm -> run-dir name by scanning <loop_dir>/<prefix>_*_s*_gH<goal_h>.
+
+    Used when none of the built-in MODELS names exist on disk (the dev machine's names,
+    which differ from a retrained machine's). Returns {} unless the mapping is
+    unambiguous -- one candidate per arm -- so a wrong mapping can never be averaged into
+    a table; otherwise the candidates are reported and the caller falls back.
+    """
+    prefix = ENV_PREFIX.get(env)
+    if not prefix or not os.path.isdir(loop_dir):
+        return {}
+    pattern = re.compile(r"^%s_(?P<arm>.+)_s(?P<seed>\d+)_gH%d$" % (re.escape(prefix), goal_h))
+    found = {}
+    for name in sorted(os.listdir(loop_dir)):
+        m = pattern.match(name)
+        if not m or not os.path.isdir(os.path.join(loop_dir, name)):
+            continue
+        # classify the FULL dir name (like run_mpc.sh): the baseline marker is
+        # "_False_", which only appears once the env prefix is in front.
+        arm = _classify_arm(name)
+        if arm:
+            # store the run-dir name WITHOUT the _s<seed>_gH<H> suffix, i.e. exactly
+            # what collect_arm() prefixes with "_s<seed>_gH<H>" again.
+            suffix = "_s%s_gH%d" % (m.group("seed"), goal_h)
+            found.setdefault(arm, set()).add(name[: -len(suffix)])
+    resolved = {}
+    for arm in ARM_ORDER:
+        cands = sorted(found.get(arm, ()))
+        if len(cands) == 1:
+            resolved[arm] = cands[0]
+        elif cands:
+            print("  [warn] %s / %s: %d candidates for arm '%s' (%s)"
+                  % (loop_dir, env, len(cands), arm, ", ".join(cands)), file=sys.stderr)
+            return {}
+    return resolved if len(resolved) == len(ARM_ORDER) else {}
+
+
 def build(loop_dirs, seeds, goal_h, envs):
     """Collect every (loop, env, arm) cell plus the per-run provenance rows."""
     data, run_rows, notes = {}, [], []
     for loop_dir in loop_dirs:
         loop_rows = {}
         for env in envs:
+            # Prefer the repo's built-in (dev machine) arm names; if none of them exist
+            # for this env, resolve the arms from the directories actually present.
+            models = dict(MODELS[env])
+            if not any(os.path.isdir(os.path.join(loop_dir, "%s_s%d_gH%d" % (models[a], s, goal_h)))
+                       for a in ARM_ORDER for s in seeds):
+                discovered = discover_arms(loop_dir, env, goal_h)
+                if discovered:
+                    models = discovered
+                    print("  [arms] %s / %s: %s"
+                          % (loop_dir, env,
+                             ", ".join("%s=%s" % (a, discovered[a]) for a in ARM_ORDER)))
+                    notes.append("%s / %s: built-in arm names absent, used the four run dirs "
+                                 "found on disk (%s)"
+                                 % (loop_dir, env,
+                                    ", ".join("%s=`%s`" % (ARM_DISPLAY[a], discovered[a])
+                                             for a in ARM_ORDER)))
             arms, env_rows = {}, []
             for arm in ARM_ORDER:
-                model = MODELS[env][arm]
+                model = models[arm]
                 per_seed, missing = collect_arm(loop_dir, model, seeds, goal_h)
                 if missing and per_seed:
                     notes.append("%s / %s / `%s`: no final_eval for seed(s) %s"
@@ -281,7 +362,7 @@ def build(loop_dirs, seeds, goal_h, envs):
             if not any(arms[a]["n"] for a in ARM_ORDER):
                 # No run at all for this env in this loop: no table, one note.
                 print("  [warn] %s: no runs for env '%s' (%s)"
-                      % (loop_dir, env, MODELS[env][ARM_ORDER[0]]), file=sys.stderr)
+                      % (loop_dir, env, models[ARM_ORDER[0]]), file=sys.stderr)
                 notes.append("%s: env `%s` skipped, no final_eval runs found."
                              % (loop_dir, env))
                 continue
