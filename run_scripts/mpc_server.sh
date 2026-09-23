@@ -235,6 +235,11 @@ for job in $JOBS; do
     log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
     sr=$(grep -oE 'success_rate[ =:]+[0-9.]+' "$log" 2>/dev/null | tail -1 | grep -oE '[0-9.]+' || true)
     printf '  %-28s %-9s %-8s success_rate=%s\n' "$env_sel" "$variant" "$planner" "${sr:-<n/a>}"
+    if [ "$FULL" = "0" ]; then
+        # A FULL=0 run has no success_rate by design: its [estimate] lines are the result,
+        # and they are what decides whether the full run fits the allocation.
+        grep -m4 '\[estimate\]' "$log" 2>/dev/null | sed 's/^/      /' || true
+    fi
     echo "      log: $log"
 done
 [ -n "$fail" ] && echo "failed:$fail"

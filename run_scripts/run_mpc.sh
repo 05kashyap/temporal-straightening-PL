@@ -61,11 +61,16 @@
 #      plan.py's own [timing] perform_planning_s line.
 # =============================================================================
 
-cd "$(dirname "$0")"
-source setup.sh
+# Work from the repo ROOT: plan.py, conf/ and plan_outputs_* all live one level up (the
+# wrapper's summary and analysis/div_emb_tables.py read the outputs there). The previous
+# `cd "$(dirname "$0")"` left the shell inside run_scripts/, so `"$PY" plan.py` could not be
+# found and every run dir was created under run_scripts/ instead.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE/.."
+source "$HERE/setup.sh"
 # The shared DINO-WM layout (DATA_ROOT per env, CKPT_ROOT/ART_ROOT); the smoke test
 # and train_server.sh read the same file.
-source dataset_paths.sh
+source "$HERE/dataset_paths.sh"
 PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
@@ -506,6 +511,11 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
             }' /dev/null
     fi
 }
+# Any run that fails, or that produces no result, sets RC_FAILED; the script exits with it.
+# Without this, mpc_server.sh reports "[ok]" for envs that failed (its [FAIL] comes from
+# this exit status) and the summary lists success_rate=<n/a> with no failing env named.
+RC_FAILED=0
+
 # --- run ----------------------------------------------------------------------
 echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL OL=$OL ==="
 echo "=== data: DATASET_DIR=$DATASET_DIR  (DATA_ROOT=${DATA_ROOT:-<default>}) ==="
@@ -537,6 +547,7 @@ fi
 for model in "${MODELS_SEL[@]}"; do
     if [ "$DIRECT_CKBPT" != "1" ] && { [ -z "$model" ] || [ ! -d "$CKBPT/$model" ]; }; then
         echo "[skip] model not available for this env: $CKBPT/$model"
+        RC_FAILED=1
         continue
     fi
     for planner in "${PLANNERS[@]}"; do
@@ -573,6 +584,7 @@ for model in "${MODELS_SEL[@]}"; do
                 sr=$(get_sr "$rundir/logs.json")
                 if [ -z "$sr" ]; then
                     echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    RC_FAILED=1
                     continue
                 fi
                 echo "  seed $s success_rate=$sr"
@@ -602,6 +614,7 @@ for model in "${MODELS_SEL[@]}"; do
                 sr=$(get_sr "$rundir/logs.json")
                 if [ -z "$sr" ]; then
                     echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    RC_FAILED=1
                     continue
                 fi
                 echo "  seed $s success_rate=$sr"
@@ -611,6 +624,12 @@ for model in "${MODELS_SEL[@]}"; do
             continue
         fi
         echo "===== validate: $planner / $model ====="
+        # The `> "$log1"` redirects below open their file *before* run_plan runs, so the
+        # `mkdir -p "$(dirname "$rundir")"` inside run_plan comes too late: on a fresh
+        # checkout every validate run died with
+        #   plan_outputs_gd_mpc/validate_<model>_setup.log: No such file or directory
+        # (it only ever worked where an earlier full run had created the directory).
+        mkdir -p "plan_outputs_${planner}"
         log1="plan_outputs_${planner}/validate_${model}_setup.log"
         if [ "$planner" = "gd_mpc" ]; then
             setup_extra=(planner.sub_planner.opt_steps=0)
@@ -628,10 +647,12 @@ for model in "${MODELS_SEL[@]}"; do
         t_setup=$(( t1 - t0 ))
         if grep -qi 'OutOfMemoryError\|out of memory' "$log1"; then
             echo "  !! OOM during setup. The model does not fit at batch 1; nothing more to chunk."
+            RC_FAILED=1
             continue
         fi
         if [ $rc1 -ne 0 ]; then
             echo "  !! setup run rc=$rc1 (see $log1); skipping."
+            RC_FAILED=1
             continue
         fi
         echo "  setup ok (${t_setup}s)"
@@ -654,10 +675,12 @@ for model in "${MODELS_SEL[@]}"; do
         if grep -qi 'OutOfMemoryError\|out of memory' "$log2"; then
             echo "  !! OOM in ${planner} smoke (${t_smoke}s). Keep chunk_size=1 / reduce"
             echo "     sample_chunk_size or num_samples for the full run."
+            RC_FAILED=1
             continue
         fi
         if [ $rc2 -ne 0 ]; then
             echo "  !! ${planner} smoke rc=$rc2 (see $log2); skipping estimate."
+            RC_FAILED=1
             continue
         fi
         echo "  smoke ok (${t_smoke}s)"
@@ -668,4 +691,9 @@ for model in "${MODELS_SEL[@]}"; do
         echo
     done
 done
-echo "=== run_mpc.sh done ==="
+if [ "$RC_FAILED" -ne 0 ]; then
+    echo "=== run_mpc.sh: at least one run failed -- see the !! lines above ==="
+else
+    echo "=== run_mpc.sh done ==="
+fi
+exit "$RC_FAILED"

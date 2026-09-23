@@ -27,9 +27,11 @@
 # plan dirs: plan_outputs_{gd,cem}/ablation_* (kept separate from the main runs).
 # =============================================================================
 set -euo pipefail
-cd "$(dirname "$0")"
+# Repo ROOT, not this directory: plan.py, conf/ and plan_outputs_* are one level up.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE/.."
 
-source setup.sh                          # exports DATASET_DIR
+source "$HERE/setup.sh"                          # exports DATASET_DIR
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export MUJOCO_PY_MUJOCO_PATH="${MUJOCO_PY_MUJOCO_PATH:-$HOME/.mujoco/mujoco-2.1.2}"
 export LD_LIBRARY_PATH="${MUJOCO_PY_MUJOCO_PATH}/bin:/usr/lib/nvidia:${LD_LIBRARY_PATH:-}"

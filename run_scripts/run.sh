@@ -78,10 +78,12 @@
 #                               # predictor context stays num_hist (isolate P-Reg window from context length)
 # =============================================================================
 set -euo pipefail
-cd "$(dirname "$0")"
+# Repo ROOT, not this directory: plan.py, conf/ and plan_outputs_* are one level up.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE/.."
 
 # ---- environment ------------------------------------------------------------
-source setup.sh                          # exports DATASET_DIR
+source "$HERE/setup.sh"                          # exports DATASET_DIR
 export DATASET_DIR="${DATASET_DIR:-$PWD/data/datasets}"
 export WANDB_MODE="${WANDB_MODE:-offline}"   # no wandb api key on this machine
 
