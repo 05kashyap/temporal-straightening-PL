@@ -23,7 +23,7 @@
 # Chunking: on a big server GPU the evaluation is NOT chunked by default --
 # CHUNK=null / OL_CHUNK=null / CEM_CHUNK=null put all n_evals (50) episodes in one
 # batch and start that many env processes, so request --cpus-per-task >= n_evals
-# (the default below is 32; use --cpus-per-task=64 if the node allows). Set
+# (the default below is 16; use --cpus-per-task=32 if the node allows). Set
 # CHUNK=1 to go back to the 12 GB-laptop behaviour (one episode per chunk) and
 # CEM_CHUNK=50 to bound the CEM candidate rollout memory.
 #
@@ -38,8 +38,8 @@
 #SBATCH --job-name=ts-mpc
 #SBATCH --account=torch_pr_718_cds
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=32   # unchunked planning: one env process per episode (n_evals=50)
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=16   # unchunked planning: one env process per episode (n_evals=50)
+#SBATCH --mem=64G
 #SBATCH --time=24:00:00
 #SBATCH --output=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.out
 #SBATCH --error=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.err
