@@ -177,9 +177,11 @@ echo 'set -uo pipefail'
 for _v in "${PREAMBLE_VARS[@]}"; do echo "export $_v=$(printf '%q' "${!_v}")"; done
 unset _v
 cat <<'BODYEOF'
+[ -r "$CONTAINER_CONDA/etc/profile.d/conda.sh" ] || { echo "FATAL: $CONTAINER_CONDA/etc/profile.d/conda.sh is not visible in the image -- is CONTAINER_CONDA right?" >&2; exit 1; }
 export PATH="$CONTAINER_CONDA/bin:$PATH"
 source "$CONTAINER_CONDA/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+conda activate "$CONDA_ENV" || { echo "FATAL: conda activate $CONDA_ENV failed (CONTAINER_CONDA=$CONTAINER_CONDA)" >&2; exit 1; }
+command -v python >/dev/null 2>&1 || { echo "FATAL: no python on PATH after activating CONTAINER_CONDA=$CONTAINER_CONDA, CONDA_ENV=$CONDA_ENV -- are those right?" >&2; exit 1; }
 [ -r "$ENV_FILE" ] || { echo "FATAL: $ENV_FILE not visible in the container -- add --bind \$HOME:\$HOME" >&2; exit 9; }
 source "$ENV_FILE"
 cd "$REPO_IN_CONTAINER" || { echo "FATAL: $REPO_IN_CONTAINER is not visible in the container" >&2; exit 1; }

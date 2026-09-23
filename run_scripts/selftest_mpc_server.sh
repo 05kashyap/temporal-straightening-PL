@@ -22,7 +22,8 @@
 #   4. the preflight gate stops the run when the smoke test fails
 #   5. a missing ENV_FILE is reported before apptainer starts
 #   6. a checkout outside $HOME is refused, and ALLOW_OUTSIDE_HOME=1 overrides
-#   7. LIVE=1 additionally starts the real image (fakeroot + overlay + python)
+#   7. LIVE=1 additionally starts the real image (fakeroot + overlay + the ts env)
+#   2b. a wrong CONTAINER_CONDA is named, not a cascade of "python not found"
 #
 # Check 0 is a gate: it proves the stubs are the binaries that will be used, and 0b
 # proves the wrapper takes the stub from APPTAINER_BIN even when PATH prefers another
@@ -78,10 +79,13 @@ ok() { printf '  PASS  %s\n' "$1"; pass=$((pass + 1)); }
 no() { printf '  FAIL  %s\n' "$1"; printf '        | %s\n' "${2:-<no output>}" | tail -10; fail=$((fail + 1)); }
 
 # --- stubs: apptainer, the container conda, run_mpc.sh, python -------------------------
-mkdir -p "$T/bin" "$T/ck/test" "$T/miniconda/etc/profile.d" "$T/spool" "$T/py_ok" "$T/py_bad"
+mkdir -p "$T/bin" "$T/ck/test" "$T/miniconda/etc/profile.d" "$T/spool" "$T/miniconda_badpython/etc/profile.d" "$T/miniconda_badpython/bin"
 : > "$T/fake.sif"
 : > "$T/fake.overlay"
-printf 'conda() { return 0; }\n' > "$T/miniconda/etc/profile.d/conda.sh"
+printf 'conda() { return 0; }\nPATH=%s/bin:$PATH\n' "$T/miniconda" > "$T/miniconda/etc/profile.d/conda.sh"
+mkdir -p "$T/miniconda/bin"
+printf '#!/bin/bash\necho 3.9.23\n' > "$T/miniconda/bin/python"
+chmod +x "$T/miniconda/bin/python"
 printf '#!/bin/bash\nexport MUJOCO_PATH=%s\n' "$T/miniconda" > "$T/mujoco_env.sh"
 cat > "$T/bin/apptainer" <<'STUB'
 #!/bin/bash
@@ -107,9 +111,11 @@ case "$*" in
 esac
 exec /bin/bash "$@"
 STUB
-printf '#!/bin/bash\necho "[stub python] %s"\nexit 0\n' 'ok' > "$T/py_ok/python"
-printf '#!/bin/bash\necho "[stub python] mujoco is broken"\nexit 1\n' > "$T/py_bad/python"
-chmod +x "$T/bin/apptainer" "$T/bin/bash" "$T/py_ok/python" "$T/py_bad/python"
+# a second container conda whose python fails, for the preflight check (the body prepends
+# $CONTAINER_CONDA/bin to PATH, so the stub has to live in there)
+printf 'conda() { return 0; }\nPATH=%s/bin:$PATH\n' "$T/miniconda_badpython" > "$T/miniconda_badpython/etc/profile.d/conda.sh"
+printf '#!/bin/bash\necho "[stub python] mujoco is broken" >&2\nexit 1\n' > "$T/miniconda_badpython/bin/python"
+chmod +x "$T/bin/apptainer" "$T/bin/bash" "$T/miniconda_badpython/bin/python"
 # tell the caller where the temp dir is (and why), before the first check
 TEMP_NOTE="${TEMP_NOTE:-}"
 
@@ -198,6 +204,17 @@ else
 fi
 
 echo
+echo
+echo "2b. a wrong CONTAINER_CONDA must be named, not cascade into 'python: not found'"
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 CONTAINER_CONDA="$T/definitely_not_there" CONDA_ENV=ts \
+       bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'CONTAINER_CONDA' <<<"$out" && grep -q 'conda.sh is not visible' <<<"$out"; then
+    ok "reported as a labelled FATAL naming CONTAINER_CONDA"
+else
+    no "a wrong CONTAINER_CONDA was not reported clearly (rc=$rc)" "$out"
+fi
+
+echo
 echo "3. the historical layout still fails (so this test has teeth)"
 if command -v python3 >/dev/null 2>&1; then
     python3 - "$BODY" "$T/body_broken.sh" <<'PY'
@@ -219,7 +236,8 @@ fi
 
 echo
 echo "4. the preflight gate"
-out="$(PATH="$T/bin:$T/py_bad:$PATH" PREFLIGHT=1 bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=1 CONTAINER_CONDA="$T/miniconda_badpython" \
+       bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'preflight failed' <<<"$out"; then
     ok "a failing mujoco_smoke.py stops the run before plan.py"
 else
@@ -261,7 +279,8 @@ fi
 echo
 echo "7. the real container (LIVE=1)"
 if [ "${LIVE:-0}" != "1" ]; then
-    printf '  SKIP  LIVE=1 starts the real image with the real apptainer (needs apptainer + SIF)\n'
+    printf '  SKIP  LIVE=1 starts the real image with the real apptainer (needs apptainer + SIF;\n'
+    printf '        LIVE_CONTAINER_CONDA / LIVE_CONDA_ENV override the conda env it checks)\n'
 else
     live_sif="${LIVE_SIF:-/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif}"
     live_ovl="${LIVE_OVERLAY:-/scratch/akn7847/containers/temporal-straightening/overlay-50G-10M.ext3}"
@@ -272,13 +291,18 @@ else
     elif [ ! -f "$live_ovl" ]; then
         printf '  SKIP  overlay not found: %s (set LIVE_OVERLAY=...)\n' "$live_ovl"
     else
+        # Mirror the body's first steps: the image has no python until its conda env is
+        # activated (asking a bare image for python is what this check got wrong at first).
+        live_conda="${LIVE_CONTAINER_CONDA:-/opt/miniconda}"
+        live_env="${LIVE_CONDA_ENV:-ts}"
         out="$("$REAL_APPTAINER" exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$live_ovl:ro" \
-               "$live_sif" bash -lc 'echo CONTAINER_OK; python -c "import sys; print(sys.version.split()[0])"' 2>&1)"; rc=$?
+               "$live_sif" bash -lc \
+               "echo CONTAINER_OK; export PATH=$live_conda/bin:\$PATH; source $live_conda/etc/profile.d/conda.sh; conda activate $live_env; echo PY=\$(command -v python); python -c 'import sys; print(sys.version.split()[0])'" 2>&1)"; rc=$?
         pyver="$(grep -oE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$out" | tail -1)"
         if [ "$rc" -eq 0 ] && grep -q CONTAINER_OK <<<"$out"; then
-            ok "the image starts: fakeroot + overlay + python ${pyver:-?} inside"
+            ok "the image starts: fakeroot + overlay + $live_conda:$live_env + python ${pyver:-?}"
         else
-            no "the real container did not start (rc=$rc)" "$out"
+            no "the real container did not start (rc=$rc; CONTAINER_OK present = apptainer/fakeroot/overlay are fine)" "$out"
         fi
     fi
 fi
