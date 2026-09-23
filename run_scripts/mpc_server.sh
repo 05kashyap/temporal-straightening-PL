@@ -126,6 +126,26 @@ echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$M
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
 echo "ckpt    : $CKBPT_PATH"
 echo "data    : DATA_ROOT=$DATA_ROOT"
+
+# Only $HOME is mounted into the image (see the apptainer line at the bottom), so a checkout
+# elsewhere is invisible inside it. Say so *here*, where a fix costs seconds, instead of
+# letting the body fail on `cd` after a queue slot. (This is how a /tmp clone behaves.)
+case "$REPO_IN_CONTAINER" in
+    "$HOME"/*) ;;
+    *)  if [ "${ALLOW_OUTSIDE_HOME:-0}" = "1" ]; then
+            echo "warn    : REPO_IN_CONTAINER=$REPO_IN_CONTAINER is outside \$HOME; only \$HOME is bound,"
+            echo "          so this works only if you mounted that path yourself (ALLOW_OUTSIDE_HOME=1)."
+        else
+            echo "FATAL: the checkout is at $REPO_HOST (outside \$HOME), but only \$HOME is bound into the" >&2
+            echo "       container (--bind \"\$HOME:\$HOME\"), so the body cannot cd into" >&2
+            echo "       REPO_IN_CONTAINER=$REPO_IN_CONTAINER." >&2
+            echo "       Fix: submit from a checkout under \$HOME, or set REPO_IN_CONTAINER=<path visible in" >&2
+            echo "       the image> and add --bind <host>:<container> to the apptainer line, then rerun with" >&2
+            echo "       ALLOW_OUTSIDE_HOME=1 to confirm you did that." >&2
+            exit 1
+        fi
+        ;;
+esac
 [ -f "$SIF" ] || { echo "FATAL: container image not found: $SIF" >&2; exit 1; }
 [ -f "$OVERLAY" ] || { echo "FATAL: overlay not found: $OVERLAY" >&2; exit 1; }
 [ -d "$CKBPT_PATH" ] || { echo "FATAL: checkpoint dir not found: $CKBPT_PATH (CKPT_ROOT/test)" >&2; exit 1; }

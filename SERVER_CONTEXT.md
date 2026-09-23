@@ -1178,7 +1178,11 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   to activate inside the image, and `REPO_IN_CONTAINER` is now *derived* from the
   resolved `REPO_HOST` when the checkout is under `$HOME` (which is bound 1:1 into the
   container) -- the hardcoded `/home/akn7847/wm/...` remains only as the fallback for a
-  checkout outside `$HOME`. The header prints all of it on the `body :` line.
+  checkout outside `$HOME`. The header prints all of it on the `body :` line. Because
+  `--bind "$HOME:$HOME"` is the only mount, a checkout *outside* `$HOME` cannot be reached
+  inside the image at all: the wrapper now refuses to submit in that case (with the fix
+  spelled out) instead of letting the body fail on `cd` after a queue slot -- and
+  `ALLOW_OUTSIDE_HOME=1` says "I mounted it myself" if you added a `--bind`.
 - The wrapper deliberately avoids `... | head -1` inside command substitutions: under
   `set -o pipefail` an early exit gives the upstream process SIGPIPE, the pipeline is
   non-zero, and `set -e` turns that into a silent exit-1 in the middle of the script.
@@ -1202,6 +1206,7 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
 | `.ts_mpc_body.sh: line N: ENV_FILE: unbound variable` (any `unbound variable`) | the generated body used a value before the preamble exported it (the exports were once appended after the body's `exit "$rc"`). Fixed by writing the preamble first; the wrapper now refuses to start apptainer if that inverts. Verify: `bash run_scripts/selftest_mpc_server.sh` |
 | header prints, then the job exits 1 with **no** message | a pipeline under `set -o pipefail` whose first stage dies of SIGPIPE (`... \| head -1`): `set -e` aborts silently. The wrapper avoids that pattern (see 11.3) |
+| `FATAL: the checkout is at ... (outside $HOME), but only $HOME is bound` | the repo lives outside `$HOME`, the only path mounted into the image. Submit from a checkout under `$HOME`, or set `REPO_IN_CONTAINER` + add your own `--bind`, then `ALLOW_OUTSIDE_HOME=1` |
 | `FATAL: ENV_FILE=... is not readable here` | `~/mujoco_env.sh` is not on this machine: run `run_scripts/setup_mujoco_server.sh` (11.1), or point `ENV_FILE` at your own copy |
 | `error: passing argument 1 of ... from incompatible pointer type` | GCC >= 14 promotes it: run `python run_scripts/patch_mujoco_py.py` (adds `-Wno-incompatible-pointer-types` + `-DGLEW_NO_GLU`) |
 | `Missing path to your environment variable … :None` | `get_nvidia_lib_dir()` returned None: `patch_mujoco_py.py` adds `/.singularity.d/libs` and creates `/usr/local/nvidia/lib64` |

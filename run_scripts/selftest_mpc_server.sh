@@ -21,8 +21,9 @@
 #      this test would notice if the bug came back
 #   4. the preflight gate stops the run when the smoke test fails
 #   5. a missing ENV_FILE is reported before apptainer starts
+#   6. a checkout outside $HOME is refused, and ALLOW_OUTSIDE_HOME=1 overrides
 #
-#   bash run_scripts/selftest_mpc_server.sh        # 7 PASS/FAIL lines, exit code
+#   bash run_scripts/selftest_mpc_server.sh        # 9 PASS/FAIL lines, exit code
 #   KEEP=1 bash run_scripts/selftest_mpc_server.sh # keep the temp dir (prints it)
 #
 # No pipe into `head`/`grep -q` anywhere: this file runs under `set -o pipefail`,
@@ -37,7 +38,7 @@ trap '[ "$KEEP" = "1" ] || rm -rf "$T"' EXIT
 
 pass=0; fail=0
 ok() { printf '  PASS  %s\n' "$1"; pass=$((pass + 1)); }
-no() { printf '  FAIL  %s\n' "$1"; printf '        | %s\n' "${2:-<no output>}" | sed -n '1,4p'; fail=$((fail + 1)); }
+no() { printf '  FAIL  %s\n' "$1"; printf '        | %s\n' "${2:-<no output>}" | tail -10; fail=$((fail + 1)); }
 
 # --- stubs: apptainer, the container conda, run_mpc.sh, python -------------------------
 mkdir -p "$T/bin" "$T/ck/test" "$T/miniconda/etc/profile.d" "$T/spool" "$T/py_ok" "$T/py_bad"
@@ -77,6 +78,9 @@ WRAP="$T/spool/slurm_script"
 export SLURM_SUBMIT_DIR="$REPO_HOST_SELF"
 export BODY="$T/body.sh" CKPT_ROOT="$T/ck" CKBPT="$T/ck/test" SIF="$T/fake.sif" \
        OVERLAY="$T/fake.overlay" CONTAINER_CONDA="$T/miniconda" ENV_FILE="$T/mujoco_env.sh"
+# the simulated container sees the whole filesystem, so point the body at this
+# checkout wherever it lives and acknowledge the (stubbed) mount
+export REPO_IN_CONTAINER="$REPO_HOST_SELF" ALLOW_OUTSIDE_HOME=1
 
 echo "repo : $REPO_HOST_SELF"
 echo "temp : $T"
@@ -147,6 +151,25 @@ if [ "$rc" -ne 0 ] && grep -q 'setup_mujoco_server.sh' <<<"$out"; then
     ok "reported before apptainer starts, with the fix to run"
 else
     no "a missing env file was not reported usefully (rc=$rc)" "$out"
+fi
+
+echo
+echo "6. a checkout outside \$HOME (only --bind \$HOME:\$HOME is passed)"
+mkdir -p "$T/fake_repo/run_scripts"
+cp "$REPO_HOST_SELF/run_scripts/mpc_server.sh" "$REPO_HOST_SELF/run_scripts/dataset_paths.sh" "$T/fake_repo/run_scripts/"
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 REPO_HOST="$T/fake_repo" REPO_IN_CONTAINER= \
+       ALLOW_OUTSIDE_HOME=0 bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'only \$HOME is bound' <<<"$out"; then
+    ok "refused before apptainer, with the fix spelled out"
+else
+    no "an outside-\$HOME checkout was not refused (rc=$rc)" "$out"
+fi
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 REPO_HOST="$T/fake_repo" ALLOW_OUTSIDE_HOME=1 \
+       REPO_IN_CONTAINER="$T/fake_repo" bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'outside \$HOME' <<<"$out"; then
+    ok "ALLOW_OUTSIDE_HOME=1 proceeds with a warning"
+else
+    no "the escape hatch did not work (rc=$rc)" "$out"
 fi
 
 echo
