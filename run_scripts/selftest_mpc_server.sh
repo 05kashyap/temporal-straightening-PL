@@ -22,8 +22,17 @@
 #   4. the preflight gate stops the run when the smoke test fails
 #   5. a missing ENV_FILE is reported before apptainer starts
 #   6. a checkout outside $HOME is refused, and ALLOW_OUTSIDE_HOME=1 overrides
+#   7. LIVE=1 additionally starts the real image (fakeroot + overlay + python)
 #
-#   bash run_scripts/selftest_mpc_server.sh        # 9 PASS/FAIL lines, exit code
+# Check 0 is a gate: it proves the stubs are the binaries that will be used. On a
+# node where the temp dir cannot be exec (noexec /tmp) bash would silently skip
+# them and run the cluster's apptainer, so this script would report failures that
+# have nothing to do with the wrapper. It probes for an exec-capable directory
+# (falling back to $HOME) and stops if the stubs are not what runs.
+#
+#   bash run_scripts/selftest_mpc_server.sh        # one PASS/FAIL per check, exit code
+#   LIVE=1 bash run_scripts/selftest_mpc_server.sh # + start the real container
+
 #   KEEP=1 bash run_scripts/selftest_mpc_server.sh # keep the temp dir (prints it)
 #
 # No pipe into `head`/`grep -q` anywhere: this file runs under `set -o pipefail`,
@@ -32,7 +41,32 @@
 set -uo pipefail
 
 REPO_HOST_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-T="$(mktemp -d "${TMPDIR:-/tmp}/ts_selftest.XXXXXX")"
+REAL_APPTAINER="$(command -v apptainer 2>/dev/null || true)"   # before any stub exists
+
+# The stubs must be executables that really run. Where /tmp is mounted noexec, bash skips a
+# stub it cannot execute and uses the next apptainer on PATH -- the cluster's own, which
+# then rejects the empty stub image and makes this script report failures that have nothing
+# to do with the wrapper. So probe for a directory that allows execution, and fall back to
+# $HOME if the temp dir cannot do it.
+_make_temp() {
+    local base="$1" d
+    d="$(mktemp -d "$base/ts_selftest.XXXXXX" 2>/dev/null)" || return 1
+    printf '#!/bin/bash\nexit 0\n' > "$d/.exectest" 2>/dev/null || { rm -rf "$d"; return 1; }
+    chmod +x "$d/.exectest" 2>/dev/null
+    if "$d/.exectest" 2>/dev/null; then printf '%s\n' "$d"; return 0; fi
+    rm -rf "$d"
+    return 1
+}
+TEMP_NOTE="in ${TMPDIR:-/tmp}"
+T="$(_make_temp "${TMPDIR:-/tmp}")" || {
+    T="$(_make_temp "$HOME")" || {
+        echo "FATAL: nowhere to put an executable stub (tried ${TMPDIR:-/tmp} and $HOME)." >&2
+        echo "       If the stubs cannot run, the cluster's own apptainer is used and this test" >&2
+        echo "       measures the wrong thing. Run it from a filesystem that allows exec." >&2
+        exit 1
+    }
+    TEMP_NOTE="under \$HOME (/tmp cannot execute a script here)"
+}
 KEEP="${KEEP:-0}"
 trap '[ "$KEEP" = "1" ] || rm -rf "$T"' EXIT
 
@@ -49,6 +83,7 @@ printf '#!/bin/bash\nexport MUJOCO_PATH=%s\n' "$T/miniconda" > "$T/mujoco_env.sh
 cat > "$T/bin/apptainer" <<'STUB'
 #!/bin/bash
 # stands in for: apptainer exec --fakeroot --nv --bind X --overlay Y <image> <cmd...>
+if [ "${1:-}" = "--ts-selftest" ]; then echo STUB_APPTAINER_OK; exit 0; fi
 args=("$@"); i=0
 while [ "$i" -lt "${#args[@]}" ]; do
     case "${args[$i]}" in
@@ -63,6 +98,7 @@ exec "${args[@]:$i}"
 STUB
 cat > "$T/bin/bash" <<'STUB'
 #!/bin/bash
+if [ "${1:-}" = "--ts-selftest" ]; then echo STUB_BASH_OK; exit 0; fi
 case "$*" in
     *run_mpc.sh*) echo "[stub run_mpc.sh] $*"; echo "success_rate=0.99"; exit 0 ;;
 esac
@@ -71,6 +107,8 @@ STUB
 printf '#!/bin/bash\necho "[stub python] %s"\nexit 0\n' 'ok' > "$T/py_ok/python"
 printf '#!/bin/bash\necho "[stub python] mujoco is broken"\nexit 1\n' > "$T/py_bad/python"
 chmod +x "$T/bin/apptainer" "$T/bin/bash" "$T/py_ok/python" "$T/py_bad/python"
+# tell the caller where the temp dir is (and why), before the first check
+TEMP_NOTE="${TEMP_NOTE:-}"
 
 # --- the wrapper exactly as sbatch sees it: a spool copy, not the checkout file --------
 cp "$REPO_HOST_SELF/run_scripts/mpc_server.sh" "$T/spool/slurm_script"
@@ -83,8 +121,27 @@ export BODY="$T/body.sh" CKPT_ROOT="$T/ck" CKBPT="$T/ck/test" SIF="$T/fake.sif" 
 export REPO_IN_CONTAINER="$REPO_HOST_SELF" ALLOW_OUTSIDE_HOME=1
 
 echo "repo : $REPO_HOST_SELF"
-echo "temp : $T"
+echo "temp : $T  $TEMP_NOTE"
+echo "real : apptainer=${REAL_APPTAINER:-<none on PATH>}  # what LIVE=1 would start"
 
+
+echo
+echo "0. the stubs are the executables that will run (gate)"
+_stub_apt="$(PATH="$T/bin:$PATH" "$T/bin/apptainer" --ts-selftest 2>&1 || true)"
+_stub_sh="$(PATH="$T/bin:$PATH" "$T/bin/bash" --ts-selftest 2>&1 || true)"
+_res_apt="$(PATH="$T/bin:$PATH" command -v apptainer 2>/dev/null || true)"
+_res_sh="$(PATH="$T/bin:$PATH" command -v bash 2>/dev/null || true)"
+if [ "$_stub_apt" = "STUB_APPTAINER_OK" ] && [ "$_stub_sh" = "STUB_BASH_OK" ] \
+   && [ "$_res_apt" = "$T/bin/apptainer" ] && [ "$_res_sh" = "$T/bin/bash" ]; then
+    ok "apptainer -> $_res_apt, bash -> $_res_sh (both stubs execute)"
+else
+    printf '  FAIL  the stubs would NOT be used: apptainer=%s (%s) bash=%s (%s)\n' \
+           "$_res_apt" "$_stub_apt" "$_res_sh" "$_stub_sh"
+    printf '        Without them this test would start the real apptainer and the real\n'
+    printf '        run_mpc.sh, so its results would mean nothing. Stopping here.\n'
+    printf '        temp dir: %s -- noexec filesystem? KEEP=1 keeps it for inspection.\n' "$T"
+    exit 1
+fi
 
 echo
 echo "1. the wrapper's preamble-order guard"
@@ -155,21 +212,50 @@ fi
 
 echo
 echo "6. a checkout outside \$HOME (only --bind \$HOME:\$HOME is passed)"
+# "Outside $HOME" is forced by pointing HOME at a path that cannot contain the checkout:
+# that is exactly what the wrapper's check tests, and -- unlike placing the fake repo in a
+# /tmp-based directory -- it also works when $T itself fell back to $HOME (noexec /tmp).
+FAKE_HOME=/nonexistent-ts-selftest-home
 mkdir -p "$T/fake_repo/run_scripts"
 cp "$REPO_HOST_SELF/run_scripts/mpc_server.sh" "$REPO_HOST_SELF/run_scripts/dataset_paths.sh" "$T/fake_repo/run_scripts/"
-out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 REPO_HOST="$T/fake_repo" REPO_IN_CONTAINER= \
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 HOME="$FAKE_HOME" REPO_HOST="$T/fake_repo" REPO_IN_CONTAINER="$T/fake_repo" \
        ALLOW_OUTSIDE_HOME=0 bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'only \$HOME is bound' <<<"$out"; then
     ok "refused before apptainer, with the fix spelled out"
 else
     no "an outside-\$HOME checkout was not refused (rc=$rc)" "$out"
 fi
-out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 REPO_HOST="$T/fake_repo" ALLOW_OUTSIDE_HOME=1 \
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=0 HOME="$FAKE_HOME" REPO_HOST="$T/fake_repo" ALLOW_OUTSIDE_HOME=1 \
        REPO_IN_CONTAINER="$T/fake_repo" bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'outside \$HOME' <<<"$out"; then
     ok "ALLOW_OUTSIDE_HOME=1 proceeds with a warning"
 else
     no "the escape hatch did not work (rc=$rc)" "$out"
+fi
+
+echo
+echo "7. the real container (LIVE=1)"
+if [ "${LIVE:-0}" != "1" ]; then
+    printf '  SKIP  LIVE=1 starts the real image with the real apptainer (needs apptainer + SIF)\n'
+else
+    live_sif="${LIVE_SIF:-/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif}"
+    live_ovl="${LIVE_OVERLAY:-/scratch/akn7847/containers/temporal-straightening/overlay-50G-10M.ext3}"
+    if [ -z "$REAL_APPTAINER" ]; then
+        printf '  SKIP  no apptainer on PATH on this machine\n'
+    elif [ ! -f "$live_sif" ]; then
+        printf '  SKIP  image not found: %s (set LIVE_SIF=...)\n' "$live_sif"
+    elif [ ! -f "$live_ovl" ]; then
+        printf '  SKIP  overlay not found: %s (set LIVE_OVERLAY=...)\n' "$live_ovl"
+    else
+        out="$("$REAL_APPTAINER" exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$live_ovl:ro" \
+               "$live_sif" bash -lc 'echo CONTAINER_OK; python -c "import sys; print(sys.version.split()[0])"' 2>&1)"; rc=$?
+        pyver="$(grep -oE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$out" | tail -1)"
+        if [ "$rc" -eq 0 ] && grep -q CONTAINER_OK <<<"$out"; then
+            ok "the image starts: fakeroot + overlay + python ${pyver:-?} inside"
+        else
+            no "the real container did not start (rc=$rc)" "$out"
+        fi
+    fi
 fi
 
 echo

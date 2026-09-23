@@ -121,6 +121,7 @@ echo "host=$(hostname) job=${SLURM_JOB_ID:-local} gpu=$(nvidia-smi -L 2>/dev/nul
 echo "repo    : $REPO_HOST"
 echo "cpus    : ${SLURM_CPUS_PER_TASK:-<not under slurm>} requested (nproc=$(nproc 2>/dev/null || echo ?))"
 echo "body    : $BODY  (in container: repo=$REPO_IN_CONTAINER, conda=$CONTAINER_CONDA:$CONDA_ENV, env file=$ENV_FILE)"
+echo "tool    : apptainer=$(command -v apptainer 2>/dev/null || echo 'NOT on PATH')"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
@@ -264,6 +265,15 @@ if [ ! -r "$ENV_FILE" ]; then
     echo "       first (SERVER_CONTEXT 11.2), or set ENV_FILE=/path/to/mujoco_env.sh." >&2
     exit 1
 fi
+
+_apt="$(command -v apptainer 2>/dev/null || true)"
+if [ -z "$_apt" ]; then
+    echo "FATAL: apptainer is not on PATH here${SLURM_JOB_ID:+ (job $SLURM_JOB_ID)}, so the container cannot start." >&2
+    echo "       Load the module/alias you normally use, or verify the wrapper without one:" >&2
+    echo "       bash run_scripts/selftest_mpc_server.sh    (login node; stubs apptainer)" >&2
+    exit 1
+fi
+unset _apt
 
 apptainer exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$MOUNT" "$SIF" \
     bash -lc "bash $BODY"
