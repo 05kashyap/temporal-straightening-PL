@@ -20,6 +20,13 @@
 # whenever the built-ins are absent, and aborts with the candidate list if an arm is
 # ambiguous. ARM_NAMES="..." still wins, and is then used for every job in the grid.
 #
+# Chunking: on a big server GPU the evaluation is NOT chunked by default --
+# CHUNK=null / OL_CHUNK=null / CEM_CHUNK=null put all n_evals (50) episodes in one
+# batch and start that many env processes, so request --cpus-per-task >= n_evals
+# (the default below is 32; use --cpus-per-task=64 if the node allows). Set
+# CHUNK=1 to go back to the 12 GB-laptop behaviour (one episode per chunk) and
+# CEM_CHUNK=50 to bound the CEM candidate rollout memory.
+#
 # Preflight (PREFLIGHT=1, the default) runs run_scripts/mujoco_smoke.py in the same
 # container first, so a broken simulator/dataset/EGL fails in seconds instead of after
 # plan.py's startup. The first run of a *new* machine may also want OVERLAY_RW=1 (the
@@ -31,7 +38,7 @@
 #SBATCH --job-name=ts-mpc
 #SBATCH --account=torch_pr_718_cds
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32   # unchunked planning: one env process per episode (n_evals=50)
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --output=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.out
@@ -50,6 +57,9 @@ FULL="${FULL:-1}"
 OL="${OL:-0}"
 SEEDS="${SEEDS:-100 101 102}"
 PREFLIGHT="${PREFLIGHT:-1}"
+CHUNK="${CHUNK:-null}"            # closed-loop plan/eval chunking (null = one batch for all n_evals)
+OL_CHUNK="${OL_CHUNK:-null}"      # open-loop ditto
+CEM_CHUNK="${CEM_CHUNK:-null}"    # CEM sample_chunk_size (null = all candidates at once)
 CKBPT_PATH="${CKBPT:-$CKPT_ROOT/test}"
 MOUNT="$OVERLAY:ro"; [ "${OVERLAY_RW:-0}" = "1" ] && MOUNT="$OVERLAY"
 if [ "$#" -ge 2 ]; then
@@ -68,6 +78,7 @@ echo "==================== $(date '+%F %H:%M:%S') ===================="
 echo "host=$(hostname) job=${SLURM_JOB_ID:-local} gpu=$(nvidia-smi -L 2>/dev/null | head -1)"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
+echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
 echo "ckpt    : $CKBPT_PATH"
 echo "data    : DATA_ROOT=$DATA_ROOT"
 [ -f "$SIF" ] || { echo "FATAL: container image not found: $SIF" >&2; exit 1; }
@@ -135,6 +146,7 @@ BODYEOF
 { echo "export REPO_IN_CONTAINER=$(printf '%q' "$REPO_IN_CONTAINER")"
   echo "export FULL=$(printf '%q' "$FULL") OL=$(printf '%q' "$OL") SEEDS=$(printf '%q' "$SEEDS")"
   echo "export PREFLIGHT=$(printf '%q' "$PREFLIGHT") JOBS=$(printf '%q' "$JOBS")"
+  echo "export CHUNK=$(printf '%q' "$CHUNK") OL_CHUNK=$(printf '%q' "$OL_CHUNK") CEM_CHUNK=$(printf '%q' "$CEM_CHUNK")"
   echo "export CKBPT_PATH=$(printf '%q' "$CKBPT_PATH") CKPT_ROOT=$(printf '%q' "$CKPT_ROOT")"
   echo "export ENV_FILE=$(printf '%q' "${ENV_FILE:-$HOME/mujoco_env.sh}")"
   echo "export OL_SUFFIX=$(printf '%q' "$([ "$OL" = "1" ] && echo ".ol" || true)")"

@@ -310,11 +310,16 @@ FULL_MAX_ITER=20        # safety cap; the loop exits on success (~5 iters for a 
 GD_OPT=100              # paper Table 4
 CEM_SAMPLES=200         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
 CEM_OPT=10              # plan_mpc_cem.yaml default
-CEM_CHUNK=50            # roll the 200 CEM samples in chunks of 50 (12 GB GPU)
+CEM_CHUNK="${CEM_CHUNK:-50}"   # CEM sample_chunk_size; "null" rolls every candidate at once
 
 S_N_EVALS=1
 S_MAX_ITER=1
 S_CHUNK=1               # batch-1 everywhere: the safest memory config
+# Episodes per plan/eval chunk for the FULL runs (closed loop). 1 is the default and
+# what a 12 GB dev GPU needs: batch-1 rollouts and ONE env process. "null" puts all
+# n_evals in a single batch, which also starts one env process per episode -- so
+# request at least n_evals CPUs (run_scripts/mpc_server.sh does) to use them.
+CHUNK="${CHUNK:-$S_CHUNK}"
 S_GD_OPT=3
 S_CEM_SAMPLES=8
 S_CEM_OPT=2
@@ -462,7 +467,7 @@ print_full_cmd() {  # $1 planner, $2 model
     echo "  FULL: $PY plan.py --config-name $cfg \\"
     echo "        ckpt_base_path=$(ckpt_full "$model") model_name=$model \\"
     echo "        hydra.run.dir=plan_outputs_${planner}/${model}_gH${GOAL_H} \\"
-    echo "        goal_H=$GOAL_H n_evals=$FULL_N_EVALS chunk_size=$S_CHUNK \\"
+    echo "        goal_H=$GOAL_H n_evals=$FULL_N_EVALS chunk_size=$CHUNK \\"
     echo "        planner.max_iter=$FULL_MAX_ITER $(obj_for "$planner") $extra"
 }
 
@@ -480,7 +485,7 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
             BEGIN {
                 per = pp / steps
                 full = n * iters * budget * per + setup
-                print "  [estimate] full faithful gd_mpc on " m " (chunk_size=1):"
+                print "  [estimate] full faithful gd_mpc on " m " (per-episode, batch-1 estimate):"
                 print "      ~" int(full/60) " min if the goal is reached in ~" iters " MPC iters (typical)"
                 print "      up to ~" int(full * cap / iters / 60) " min if all " cap " iters run the full budget"
                 print "      (" per " s per GD opt step at batch 1; raising chunk_size batches evals"
@@ -493,7 +498,7 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
             BEGIN {
                 per = pp / (samp * steps)
                 full = n * iters * ns * budget * per + setup
-                print "  [estimate] full faithful mpc_cem on " m " (chunk_size=1):"
+                print "  [estimate] full faithful mpc_cem on " m " (per-episode, batch-1 estimate):"
                 print "      ~" int(full/60) " min if the goal is reached in ~" iters " MPC iters (typical)"
                 print "      up to ~" int(full * cap / iters / 60) " min if all " cap " iters run the full budget"
                 print "      (" per " s per CEM sample-step at batch 1; sample_chunk_size=" cchunk " bounds"
@@ -510,6 +515,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
         for _pl in "${PLANNERS[@]}"; do
             echo "  env=$ENV_SEL variant=$VARIANT arm=${MODELS[$_i]} planner=$_pl"
             echo "      seeds=$SEEDS FULL=$FULL OL=$OL n_evals=$FULL_N_EVALS max_iter=$FULL_MAX_ITER"
+            echo "      chunk(closed)=$CHUNK  OL_CHUNK=$OL_CHUNK  cem_sample_chunk=$CEM_CHUNK  (null = no chunking)"
             echo "      ckpt=$CKBPT DATASET_DIR=$DATASET_DIR"
         done
     done
@@ -577,6 +583,7 @@ for model in "${MODELS_SEL[@]}"; do
         fi
         if [ "$FULL" = "1" ]; then
             echo "===== FULL MPC: $planner / $model (seeds: $SEEDS) ====="
+            RUN_CHUNK="$CHUNK"
             for s in $SEEDS; do
                 rundir="plan_outputs_${planner}/${model}_s${s}_gH${GOAL_H}"
                 # fresh run: logs.json is append-mode, so a crashed/partial dir
@@ -600,6 +607,7 @@ for model in "${MODELS_SEL[@]}"; do
                 echo "  seed $s success_rate=$sr"
             done
             report_mean_std "$planner" "$model" "$GOAL_H" $SEEDS
+            unset RUN_CHUNK
             continue
         fi
         echo "===== validate: $planner / $model ====="

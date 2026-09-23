@@ -1140,6 +1140,16 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   still has to be compiled. Arm names are **discovered per env** by `run_mpc.sh`
   (token match: `_False_`, `cos`, two-thirds, both) with an abort-and-list on
   ambiguity, so the MPC grid no longer needs `ARM_NAMES` at all.
+- **Chunking on the server**: `run_scripts/mpc_server.sh` plans *unchunked* by default
+  (`CHUNK=null`, `OL_CHUNK=null`, `CEM_CHUNK=null`) -- all `n_evals=50` episodes in one
+  batch, which also starts one env process per episode. That is the point of the bigger
+  GPU, but it needs CPUs to match: `--cpus-per-task=32` in the script (raise it to >= 50
+  via `sbatch --cpus-per-task=64 ...` if the node allows). Middle ground / fallbacks:
+  `CHUNK=8 OL_CHUNK=8` (8 episodes per batch and 8 env processes, comfortable on 8-16
+  CPUs), `CHUNK=1` for the 12 GB-laptop behaviour, `CEM_CHUNK=50` to bound the CEM
+  candidate-rollout memory. Chunk size never changes the numbers (the divergence
+  metrics are exact Frobenius norms under chunking); `n_evals` does, so keep it at 50.
+  `DRY_RUN=1 bash run_scripts/run_mpc.sh ...` prints the resolved chunks and budgets.
 - The tables find those names too: `analysis/div_emb_tables.py` falls back to the
   same token-based discovery when the built-in names are absent, so
   `python3 analysis/div_emb_tables.py` (host python is enough -- it only reads
