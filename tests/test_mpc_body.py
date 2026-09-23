@@ -69,6 +69,12 @@ def generated_body(tmp_path):
         (tmp_path / stub).write_text("")
     env = dict(os.environ,
                SLURM_SUBMIT_DIR=str(REPO),
+               # Say explicitly where the checkout is *and* that it is visible inside the
+               # simulated container: the wrapper refuses an out-of-$HOME checkout unless
+               # told, and this test must work from a /tmp clone as well as under $HOME.
+               REPO_HOST=str(REPO),
+               REPO_IN_CONTAINER=str(REPO),
+               ALLOW_OUTSIDE_HOME="1",
                BODY=str(tmp_path / "body.sh"),
                CKPT_ROOT=str(tmp_path / "ck"),
                CKBPT=str(tmp_path / "ck" / "test"),
