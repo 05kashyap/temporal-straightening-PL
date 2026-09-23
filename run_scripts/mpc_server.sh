@@ -97,6 +97,7 @@ FULL="${FULL:-1}"
 OL="${OL:-0}"
 SEEDS="${SEEDS:-100 101 102}"
 PREFLIGHT="${PREFLIGHT:-1}"
+PROBE="${PROBE:-0}"              # 1 = run run_scripts/gl_backend_probe.py first
 CHUNK="${CHUNK:-null}"            # closed-loop plan/eval chunking (null = one batch for all n_evals)
 OL_CHUNK="${OL_CHUNK:-null}"      # open-loop ditto
 CEM_CHUNK="${CEM_CHUNK:-null}"    # CEM sample_chunk_size (null = all candidates at once)
@@ -132,6 +133,7 @@ echo "repo    : $REPO_HOST"
 echo "cpus    : ${SLURM_CPUS_PER_TASK:-<not under slurm>} requested (nproc=$(nproc 2>/dev/null || echo ?))"
 echo "body    : $BODY  (in container: repo=$REPO_IN_CONTAINER, conda=$CONTAINER_CONDA:$CONDA_ENV, env file=$ENV_FILE)"
 echo "tool    : apptainer=${APPTAINER_BIN:-NOT FOUND (PATH and APPTAINER_BIN are empty)}"
+echo "probe   : PROBE=$PROBE   (1 = run the fork/spawn EGL probe before the preflight)"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
@@ -171,7 +173,7 @@ esac
 # never executed at all. PREAMBLE_VARS is the single source of truth here: it drives both
 # the export block and the ordering check further down, so the two cannot drift apart.
 PREAMBLE_VARS=(REPO_IN_CONTAINER CONTAINER_CONDA CONDA_ENV FULL OL SEEDS PREFLIGHT JOBS
-               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO)
+               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO PROBE)
 OL_SUFFIX=""
 if [ "$OL" = "1" ]; then OL_SUFFIX=".ol"; fi
 
@@ -195,6 +197,11 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 log_dir="$CKPT_ROOT/logs"
 mkdir -p "$log_dir"
 echo "[container] python=$(command -v python)  DATA_ROOT=$DATA_ROOT  log_dir=$log_dir"
+
+if [ "$PROBE" = "1" ]; then
+    echo "---- GL probe: does a forked env worker initialise EGL here? ----"
+    python run_scripts/gl_backend_probe.py || echo "[probe] exited $? -- continuing anyway"
+fi
 
 if [ "$PREFLIGHT" = "1" ]; then
     echo "---- preflight: mujoco / gym / EGL / datasets ----"

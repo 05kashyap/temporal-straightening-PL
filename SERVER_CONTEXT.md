@@ -1212,6 +1212,14 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 - The wrapper deliberately avoids `... | head -1` inside command substitutions: under
   `set -o pipefail` an early exit gives the upstream process SIGPIPE, the pipeline is
   non-zero, and `set -e` turns that into a silent exit-1 in the middle of the script.
+- `PROBE=1` runs `run_scripts/gl_backend_probe.py` inside the job before the preflight: it
+  renders in the main process, in a **forked** child and in a **spawned** child (twice more
+  with bare mujoco_py), because `env/venv.py`'s workers are forked and a child that forks
+  *after* any GL use can fail to initialise GL (`Failed to initialize OpenGL`) or hang, while
+  the single-process smoke-test render passes. When the probe says fork is the problem,
+  `TS_ENV_START_METHOD=spawn` gives every env worker a fresh interpreter -- `plan.py` honours
+  it and `env/venv.py` already hands the env factory over as a `CloudpickleWrapper`, so spawn
+  works without touching the paper's code.
 - Run dirs land in the **repo root**: `plan_outputs_<planner>/<model>_s<seed>_gH<H>/`, the
   `plan_outputs_<planner>/validate_*_{setup,smoke}.log` files of a `FULL=0` run, and
   `plan_outputs_<planner>/summaries/*.json`. `run_mpc.sh` therefore works from the repo root
@@ -1245,6 +1253,8 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `python: command not found` inside the container (as the LIVE check first reported) | the container's conda env was not activated: the bare image has no `python`. Run `LIVE=1 bash run_scripts/selftest_mpc_server.sh` (it activates `CONTAINER_CONDA`:`CONDA_ENV`, default `/opt/miniconda`:ts, and prints the path it found); a wrong prefix is now a labelled `FATAL: .../etc/profile.d/conda.sh is not visible` / `no python on PATH after activating ...` instead of a cascade |
 | `plan_outputs_gd_mpc/validate_<model>_setup.log: No such file or directory`, then every env "skipped", `success_rate=<n/a>`, and a `failed:` list naming only one env | the validate redirects opened their log before anything created that directory, and every failure ended in `continue` so the exit status was incidental. Fixed: `run_mpc.sh` creates the directory first and exits non-zero when a run produced no result (so `mpc_server.sh` prints `[FAIL]`) |
 | `can't open file 'plan.py'`, or `plan_outputs_*` appearing under `run_scripts/` | the driver was running from `run_scripts/` instead of the repo root (`cd "$(dirname "$0")"` with no way back). Fixed in `run_mpc.sh` / `run.sh` / `run_wall_ablation.sh` |
+| `RuntimeError: Failed to initialize OpenGL` in an `env/venv.py` worker (the smoke test's own render passes, `[timing] setup_model_s=` is already printed) | the env workers are **forked**, and a child that forks after GL has been initialised can fail (EGL) or hang (X11/GLFW) while the parent renders fine. Confirm with `PROBE=1 OVERLAY_RW=1 FULL=0 sbatch run_scripts/mpc_server.sh`, then re-run with `TS_ENV_START_METHOD=spawn` |
+| ... and if the probe fails for **both** fork and spawn | the EGL stack itself is unusable here: fall back to the CPU/OSMesa backend (`MUJOCO_PY_FORCE_CPU=1 MUJOCO_GL=osmesa`, cymj rebuilt -- see 11.1) and send the probe output to whoever set the container up |
 | `FATAL: the checkout is at ... (outside $HOME), but only $HOME is bound` | the repo lives outside `$HOME`, the only path mounted into the image. Submit from a checkout under `$HOME`, or set `REPO_IN_CONTAINER` + add your own `--bind`, then `ALLOW_OUTSIDE_HOME=1` |
 | `FATAL: ENV_FILE=... is not readable here` | `~/mujoco_env.sh` is not on this machine: run `run_scripts/setup_mujoco_server.sh` (11.1), or point `ENV_FILE` at your own copy |
 | `error: passing argument 1 of ... from incompatible pointer type` | GCC >= 14 promotes it: run `python run_scripts/patch_mujoco_py.py` (adds `-Wno-incompatible-pointer-types` + `-DGLEW_NO_GLU`) |

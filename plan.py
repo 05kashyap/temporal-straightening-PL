@@ -25,6 +25,15 @@ from utils import cfg_to_dict, seed
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+# `env/venv.py` starts its workers with `multiprocessing.Process`, i.e. fork on Linux, and a
+# forked child can fail to initialise EGL even when the parent rendered fine:
+#   RuntimeError: Failed to initialize OpenGL  (mujoco_py.cymj.OffscreenOpenGLContext)
+# `run_scripts/gl_backend_probe.py` says whether that is what happens on this machine; if
+# it is, TS_ENV_START_METHOD=spawn gives every env worker a fresh interpreter instead.
+if os.environ.get("TS_ENV_START_METHOD"):
+    import multiprocessing as _mp
+    _mp.set_start_method(os.environ["TS_ENV_START_METHOD"], force=True)
+
 
 ALL_MODEL_KEYS = [
     "encoder",
