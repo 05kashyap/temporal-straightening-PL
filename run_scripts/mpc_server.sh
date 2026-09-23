@@ -82,6 +82,11 @@ fi
 CONTAINER_CONDA="${CONTAINER_CONDA:-/opt/miniconda}"
 CONDA_ENV="${CONDA_ENV:-ts}"
 ENV_FILE="${ENV_FILE:-$HOME/mujoco_env.sh}"
+# Which apptainer to run. PATH alone is not trustworthy here: site startup files can
+# prepend their own apptainer inside every bash process (that is how the self-test's own
+# stub got skipped on torch-login-b-2), so an explicit APPTAINER_BIN wins and the header
+# prints what will actually be used.
+APPTAINER_BIN="${APPTAINER_BIN:-$(command -v apptainer 2>/dev/null || true)}"
 BODY="${BODY:-$HOME/.ts_mpc_body.sh}"
 # shared data/checkpoint layout, same file train_server.sh uses
 source "$REPO_HOST/run_scripts/dataset_paths.sh"
@@ -121,7 +126,7 @@ echo "host=$(hostname) job=${SLURM_JOB_ID:-local} gpu=$(nvidia-smi -L 2>/dev/nul
 echo "repo    : $REPO_HOST"
 echo "cpus    : ${SLURM_CPUS_PER_TASK:-<not under slurm>} requested (nproc=$(nproc 2>/dev/null || echo ?))"
 echo "body    : $BODY  (in container: repo=$REPO_IN_CONTAINER, conda=$CONTAINER_CONDA:$CONDA_ENV, env file=$ENV_FILE)"
-echo "tool    : apptainer=$(command -v apptainer 2>/dev/null || echo 'NOT on PATH')"
+echo "tool    : apptainer=${APPTAINER_BIN:-NOT FOUND (PATH and APPTAINER_BIN are empty)}"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
@@ -266,14 +271,12 @@ if [ ! -r "$ENV_FILE" ]; then
     exit 1
 fi
 
-_apt="$(command -v apptainer 2>/dev/null || true)"
-if [ -z "$_apt" ]; then
-    echo "FATAL: apptainer is not on PATH here${SLURM_JOB_ID:+ (job $SLURM_JOB_ID)}, so the container cannot start." >&2
-    echo "       Load the module/alias you normally use, or verify the wrapper without one:" >&2
-    echo "       bash run_scripts/selftest_mpc_server.sh    (login node; stubs apptainer)" >&2
+if [ -z "$APPTAINER_BIN" ]; then
+    echo "FATAL: no apptainer found (not on PATH, and APPTAINER_BIN is unset)${SLURM_JOB_ID:+ -- job $SLURM_JOB_ID}." >&2
+    echo "       Load the module you normally use, or point at it yourself, e.g." >&2
+    echo "       APPTAINER_BIN=/share/apps/apptainer/bin/apptainer sbatch run_scripts/mpc_server.sh" >&2
     exit 1
 fi
-unset _apt
 
-apptainer exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$MOUNT" "$SIF" \
+"$APPTAINER_BIN" exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$MOUNT" "$SIF" \
     bash -lc "bash $BODY"

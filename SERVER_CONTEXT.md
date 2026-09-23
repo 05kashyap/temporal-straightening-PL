@@ -1172,7 +1172,11 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   drift): every name must be exported before the first line that uses it. The check runs
   under `DRY_RUN=1` as well, so `DRY_RUN=1 bash run_scripts/mpc_server.sh` is a real
   preflight -- it lints *and* prints. `tests/test_mpc_body.py` pins all of this down,
-  including the historical layout, which must still fail.
+  including the historical layout, which must still fail. The self-test *injects* the stub
+  as `APPTAINER_BIN` rather than relying on PATH order, because bash processes on this
+  cluster rewrite `PATH` (site startup file / `BASH_ENV`) -- the wrapper takes
+  `APPTAINER_BIN` if it is set and prints the binary it will run on its `tool :` line, so
+  which apptainer runs is never a guess.
 - The self-test has a **container mode**: `LIVE=1 bash run_scripts/selftest_mpc_server.sh`
   starts the *real* image (`apptainer exec --fakeroot --nv --bind $HOME:$HOME --overlay
   <overlay>:ro`) and asks it only for `echo CONTAINER_OK` plus the python version, so
@@ -1218,7 +1222,9 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
 | `.ts_mpc_body.sh: line N: ENV_FILE: unbound variable` (any `unbound variable`) | the generated body used a value before the preamble exported it (the exports were once appended after the body's `exit "$rc"`). Fixed by writing the preamble first; the wrapper now refuses to start apptainer if that inverts. Verify: `bash run_scripts/selftest_mpc_server.sh` |
 | header prints, then the job exits 1 with **no** message | a pipeline under `set -o pipefail` whose first stage dies of SIGPIPE (`... \| head -1`): `set -e` aborts silently. The wrapper avoids that pattern (see 11.3) |
-| self-test checks 2/4/6 fail with apptainer's `image format not recognized` on an empty image | the stub `apptainer` was not executable there, so bash skipped it and ran the cluster's real apptainer (`noexec` `/tmp`). The self-test now exec-probes its temp dir, falls back to `$HOME`, and gates on "the stubs are what runs" before reporting anything |
+| self-test checks 2/4/6 fail with apptainer's `image format not recognized` on an empty stub image, **while check 0 passes** | the wrapper resolved a *different* apptainer than the gate did: bash processes on that login node rewrite `PATH` (site startup file / `BASH_ENV`), and the stub is executed *by bash* too, so PATH order is unreliable for picking a specific binary. Fixed by passing the binary explicitly: the wrapper uses `APPTAINER_BIN`, the self-test injects its stub that way, and check 0b reproduces a decoy earlier in PATH |
+| a temp directory that cannot execute a script (`noexec` `/tmp`) | bash then skips a stub it cannot run and silently uses the next one on PATH. The self-test probes for an exec-capable temp dir and falls back to `$HOME` (its header says "under $HOME") |
+| the wrapper ran an apptainer you did not expect | `tool : apptainer=...` in the job header says which one it used; set `APPTAINER_BIN=/path/to/apptainer` to pin it |
 | `FATAL: apptainer is not on PATH here` | the wrapper needs the same apptainer you use interactively: load the module/alias, or check the wrapper logic with `run_scripts/selftest_mpc_server.sh` |
 | `FATAL: the checkout is at ... (outside $HOME), but only $HOME is bound` | the repo lives outside `$HOME`, the only path mounted into the image. Submit from a checkout under `$HOME`, or set `REPO_IN_CONTAINER` + add your own `--bind`, then `ALLOW_OUTSIDE_HOME=1` |
 | `FATAL: ENV_FILE=... is not readable here` | `~/mujoco_env.sh` is not on this machine: run `run_scripts/setup_mujoco_server.sh` (11.1), or point `ENV_FILE` at your own copy |

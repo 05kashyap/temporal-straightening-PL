@@ -24,7 +24,10 @@
 #   6. a checkout outside $HOME is refused, and ALLOW_OUTSIDE_HOME=1 overrides
 #   7. LIVE=1 additionally starts the real image (fakeroot + overlay + python)
 #
-# Check 0 is a gate: it proves the stubs are the binaries that will be used. On a
+# Check 0 is a gate: it proves the stubs are the binaries that will be used, and 0b
+# proves the wrapper takes the stub from APPTAINER_BIN even when PATH prefers another
+# apptainer -- which is exactly what happens on a login node whose bash startup files
+# rewrite PATH. On a
 # node where the temp dir cannot be exec (noexec /tmp) bash would silently skip
 # them and run the cluster's apptainer, so this script would report failures that
 # have nothing to do with the wrapper. It probes for an exec-capable directory
@@ -119,6 +122,9 @@ export BODY="$T/body.sh" CKPT_ROOT="$T/ck" CKBPT="$T/ck/test" SIF="$T/fake.sif" 
 # the simulated container sees the whole filesystem, so point the body at this
 # checkout wherever it lives and acknowledge the (stubbed) mount
 export REPO_IN_CONTAINER="$REPO_HOST_SELF" ALLOW_OUTSIDE_HOME=1
+# PATH order is not trustworthy (site startup files can prepend their own apptainer
+# inside any bash process, the stub included), so hand the wrapper the stub directly
+export APPTAINER_BIN="$T/bin/apptainer"
 
 echo "repo : $REPO_HOST_SELF"
 echo "temp : $T  $TEMP_NOTE"
@@ -141,6 +147,25 @@ else
     printf '        run_mpc.sh, so its results would mean nothing. Stopping here.\n'
     printf '        temp dir: %s -- noexec filesystem? KEEP=1 keeps it for inspection.\n' "$T"
     exit 1
+fi
+
+echo
+echo
+echo "0b. a decoy apptainer earlier in PATH must not win (this is what the cluster did)"
+mkdir -p "$T/decoy"
+cat > "$T/decoy/apptainer" <<'STUB'
+#!/bin/bash
+echo DECOY_APPTAINER_RAN >&2
+exit 251
+STUB
+chmod +x "$T/decoy/apptainer"
+_decoy_res="$(PATH="$T/decoy:$T/bin:/usr/bin:/bin" command -v apptainer 2>/dev/null || true)"
+out="$(PATH="$T/decoy:$T/bin:/usr/bin:/bin" APPTAINER_BIN="$T/bin/apptainer" PREFLIGHT=0 \
+       bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+if [ "$_decoy_res" = "$T/decoy/apptainer" ] && [ "$rc" -eq 0 ] && ! grep -q DECOY_APPTAINER_RAN <<<"$out"; then
+    ok "PATH preferred the decoy ($_decoy_res) but the explicit APPTAINER_BIN ran"
+else
+    no "the decoy in PATH won instead of APPTAINER_BIN (rc=$rc, resolved=$_decoy_res)" "$out"
 fi
 
 echo
