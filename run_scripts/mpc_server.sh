@@ -20,12 +20,13 @@
 # whenever the built-ins are absent, and aborts with the candidate list if an arm is
 # ambiguous. ARM_NAMES="..." still wins, and is then used for every job in the grid.
 #
-# Chunking: on a big server GPU the evaluation is NOT chunked by default --
-# CHUNK=null / OL_CHUNK=null / CEM_CHUNK=null put all n_evals (50) episodes in one
-# batch and start that many env processes, so request --cpus-per-task >= n_evals
-# (the default below is 16; use --cpus-per-task=32 if the node allows). Set
-# CHUNK=1 to go back to the 12 GB-laptop behaviour (one episode per chunk) and
-# CEM_CHUNK=50 to bound the CEM candidate rollout memory.
+# Chunking: the evaluation is NOT chunked by default -- CHUNK=null / OL_CHUNK=null /
+# CEM_CHUNK=null put all n_evals (50) episodes in one batch, which also starts one
+# env process per episode. Those workers are CPU-bound and a job here is capped at 16
+# CPUs (#SBATCH below), so 50 simulators share 16 cores: fine, but if the run turns
+# out simulator-bound, CHUNK=16 OL_CHUNK=16 matches the allocation (3 batches instead
+# of 50). The script prints that hint at startup. CHUNK=1 restores the 12 GB-laptop
+# behaviour; CEM_CHUNK=50 bounds CEM candidate memory.
 #
 # Preflight (PREFLIGHT=1, the default) runs run_scripts/mujoco_smoke.py in the same
 # container first, so a broken simulator/dataset/EGL fails in seconds instead of after
@@ -76,6 +77,15 @@ PREFLIGHT="${PREFLIGHT:-1}"
 CHUNK="${CHUNK:-null}"            # closed-loop plan/eval chunking (null = one batch for all n_evals)
 OL_CHUNK="${OL_CHUNK:-null}"      # open-loop ditto
 CEM_CHUNK="${CEM_CHUNK:-null}"    # CEM sample_chunk_size (null = all candidates at once)
+
+# Unchunked planning starts one env process per episode; say so rather than silently
+# chunking (or silently oversubscribing the allocation).
+_cpus="${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || echo 1)}"
+if { [ "$CHUNK" = "null" ] || [ "$OL_CHUNK" = "null" ]; } && [ "$_cpus" -lt 50 ]; then
+    echo "note    : unchunked planning starts one env process per episode (50) on $_cpus CPUs;"
+    echo "          if the run is simulator-bound, resubmit with CHUNK=$_cpus OL_CHUNK=$_cpus"
+fi
+unset _cpus
 CKBPT_PATH="${CKBPT:-$CKPT_ROOT/test}"
 MOUNT="$OVERLAY:ro"; [ "${OVERLAY_RW:-0}" = "1" ] && MOUNT="$OVERLAY"
 if [ "$#" -ge 2 ]; then
@@ -93,6 +103,7 @@ fi
 echo "==================== $(date '+%F %H:%M:%S') ===================="
 echo "host=$(hostname) job=${SLURM_JOB_ID:-local} gpu=$(nvidia-smi -L 2>/dev/null | head -1)"
 echo "repo    : $REPO_HOST"
+echo "cpus    : ${SLURM_CPUS_PER_TASK:-<not under slurm>} requested (nproc=$(nproc 2>/dev/null || echo ?))"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"

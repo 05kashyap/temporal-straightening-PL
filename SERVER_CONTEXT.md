@@ -1143,10 +1143,12 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 - **Chunking on the server**: `run_scripts/mpc_server.sh` plans *unchunked* by default
   (`CHUNK=null`, `OL_CHUNK=null`, `CEM_CHUNK=null`) -- all `n_evals=50` episodes in one
   batch, which also starts one env process per episode. That is the point of the bigger
-  GPU, but it needs CPUs to match: `--cpus-per-task=32` in the script (raise it to >= 50
-  via `sbatch --cpus-per-task=64 ...` if the node allows). Middle ground / fallbacks:
-  `CHUNK=8 OL_CHUNK=8` (8 episodes per batch and 8 env processes, comfortable on 8-16
-  CPUs), `CHUNK=1` for the 12 GB-laptop behaviour, `CEM_CHUNK=50` to bound the CEM
+  GPU, but it needs CPUs to match -- and a job here is capped at **16 CPUs**
+  (`#SBATCH --cpus-per-task=16`, `--mem=64G`), so 50 simulators share 16 cores: the
+  script prints a startup hint saying so, and `CHUNK=16 OL_CHUNK=16` matches the
+  allocation (3 batches instead of 50) if the run turns out simulator-bound. Other
+  fallbacks: `CHUNK=8 OL_CHUNK=8`, `CHUNK=1` for the 12 GB-laptop behaviour,
+  `CEM_CHUNK=50` to bound the CEM
   candidate-rollout memory. Chunk size never changes the numbers (the divergence
   metrics are exact Frobenius norms under chunking); `n_evals` does, so keep it at 50.
   `DRY_RUN=1 bash run_scripts/run_mpc.sh ...` prints the resolved chunks and budgets.
