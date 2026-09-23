@@ -211,15 +211,24 @@ class PlanEvaluator:  # evaluator for planning
         print("Success rate: ", logs["success_rate"])
         print(eval_results_all)
 
-        # plot trajs (only the first chunk is decoded, matching n_plot_samples)
+        # plot trajs. Only n_plot_samples trajectories are visualized, whatever chunk_size
+        # is: i_z_obses_first holds the FIRST CHUNK (chunk_size rows, from line 135), so it has
+        # to be sliced here for the decoded batch, the masks and the plot to agree. Masking it
+        # with action_len[:n_plot_samples] instead raised, for chunk_size > n_plot_samples:
+        #   IndexError: index 10 is out of bounds for axis 0 with size 10
+        # and decoding the whole chunk wasted GPU memory on trajectories nobody plots.
         if self.decode_for_viz and self.wm.decoder is not None:
+            n_viz = min(self.n_plot_samples, i_z_obses_first["visual"].shape[0])
+            i_z_first = {k: v[:n_viz] for k, v in i_z_obses_first.items()}
             with torch.no_grad():
-                i_visuals = self.wm.decode_obs(i_z_obses_first)[0]["visual"]
+                i_visuals = self.wm.decode_obs(i_z_first)[0]["visual"]
             i_visuals = self._mask_traj(
-                i_visuals, action_len[: self.n_plot_samples] + 1
+                i_visuals, action_len[: i_visuals.shape[0]] + 1
             )  # we have action_len + 1 states
             e_visuals = self.preprocessor.transform_obs_visual(e_obses["visual"])
-            e_visuals = self._mask_traj(e_visuals, action_len * self.frameskip + 1)
+            e_visuals = self._mask_traj(
+                e_visuals, action_len[: e_visuals.shape[0]] * self.frameskip + 1
+            )
             self._plot_rollout_compare(
                 e_visuals=e_visuals,
                 i_visuals=i_visuals,
@@ -273,9 +282,13 @@ class PlanEvaluator:  # evaluator for planning
         i_visuals: (b, t, h, w, c)
         goal: (b, h, w, c)
         """
-        e_visuals = e_visuals[: self.n_plot_samples]
-        i_visuals = i_visuals[: self.n_plot_samples]
-        goal_visual = self.obs_g["visual"][: self.n_plot_samples]
+        # Both sides must be the same batch: i_visuals is the decoded first chunk (which can
+        # be smaller than n_plot_samples when chunk_size is), e_visuals is every episode. The
+        # video loop below iterates this batch and indexes i_visuals, so a mismatch crashed it.
+        n_viz = min(self.n_plot_samples, e_visuals.shape[0], i_visuals.shape[0])
+        e_visuals = e_visuals[:n_viz]
+        i_visuals = i_visuals[:n_viz]
+        goal_visual = self.obs_g["visual"][:n_viz]
         goal_visual = self.preprocessor.transform_obs_visual(goal_visual)
 
         i_visuals = i_visuals.unsqueeze(2)

@@ -1220,6 +1220,13 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `TS_ENV_START_METHOD=spawn` gives every env worker a fresh interpreter -- `plan.py` honours
   it and `env/venv.py` already hands the env factory over as a `CloudpickleWrapper`, so spawn
   works without touching the paper's code.
+- `FULL=0` ends with a **batch sanity stage** (`SANITY=1`, the default; `SANITY=0` skips it):
+  `S_SANITY_N_EVALS=12` episodes (> `n_plot_samples=10`) at the *configured* `chunk_size`
+  (`CHUNK`, i.e. `null` = all at once), one iteration and a tiny sub-planner budget. The
+  batch-1 stages above run `n_evals=1` / `chunk_size=1`, so they cannot exercise
+  batch-dependent code -- which is how the `chunk_size > n_plot_samples` IndexError in the
+  evaluator's visualization passed validation and killed the full run. Cost: the model/dataset
+  load plus 12 cheap episodes (~2-3 min).
 - Run dirs land in the **repo root**: `plan_outputs_<planner>/<model>_s<seed>_gH<H>/`, the
   `plan_outputs_<planner>/validate_*_{setup,smoke}.log` files of a `FULL=0` run, and
   `plan_outputs_<planner>/summaries/*.json`. `run_mpc.sh` therefore works from the repo root
@@ -1253,6 +1260,7 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `python: command not found` inside the container (as the LIVE check first reported) | the container's conda env was not activated: the bare image has no `python`. Run `LIVE=1 bash run_scripts/selftest_mpc_server.sh` (it activates `CONTAINER_CONDA`:`CONDA_ENV`, default `/opt/miniconda`:ts, and prints the path it found); a wrong prefix is now a labelled `FATAL: .../etc/profile.d/conda.sh is not visible` / `no python on PATH after activating ...` instead of a cascade |
 | `plan_outputs_gd_mpc/validate_<model>_setup.log: No such file or directory`, then every env "skipped", `success_rate=<n/a>`, and a `failed:` list naming only one env | the validate redirects opened their log before anything created that directory, and every failure ended in `continue` so the exit status was incidental. Fixed: `run_mpc.sh` creates the directory first and exits non-zero when a run produced no result (so `mpc_server.sh` prints `[FAIL]`) |
 | `can't open file 'plan.py'`, or `plan_outputs_*` appearing under `run_scripts/` | the driver was running from `run_scripts/` instead of the repo root (`cd "$(dirname "$0")"` with no way back). Fixed in `run_mpc.sh` / `run.sh` / `run_wall_ablation.sh` |
+| `IndexError: index 10 is out of bounds for axis 0 with size 10` in `planning/evaluator.py`'s `_mask_traj` (the eval itself printed a `Success rate`) | the visualization mixed two batch sizes: `i_z_obses_first` is the whole **first chunk** (`chunk_size` rows) while the mask came from `action_len[:n_plot_samples]` (10). Any `chunk_size > n_plot_samples` crashed -- and `chunk_size < 10` broke the plotter's video loop, which iterates `e_visuals` while indexing `i_visuals`. Fixed by decoding/plotting `min(n_plot_samples, chunk)` and masking each array by its own batch size; metrics were never affected. `SANITY=1 FULL=0` (default) now exercises exactly this, see 11.3 |
 | `RuntimeError: Failed to initialize OpenGL` in an `env/venv.py` worker (the smoke test's own render passes, `[timing] setup_model_s=` is already printed) | the env workers are **forked**, and a child that forks after GL has been initialised can fail (EGL) or hang (X11/GLFW) while the parent renders fine. Confirm with `PROBE=1 OVERLAY_RW=1 FULL=0 sbatch run_scripts/mpc_server.sh`, then re-run with `TS_ENV_START_METHOD=spawn` |
 | ... and if the probe fails for **both** fork and spawn | the EGL stack itself is unusable here: fall back to the CPU/OSMesa backend (`MUJOCO_PY_FORCE_CPU=1 MUJOCO_GL=osmesa`, cymj rebuilt -- see 11.1) and send the probe output to whoever set the container up |
 | `FATAL: the checkout is at ... (outside $HOME), but only $HOME is bound` | the repo lives outside `$HOME`, the only path mounted into the image. Submit from a checkout under `$HOME`, or set `REPO_IN_CONTAINER` + add your own `--bind`, then `ALLOW_OUTSIDE_HOME=1` |

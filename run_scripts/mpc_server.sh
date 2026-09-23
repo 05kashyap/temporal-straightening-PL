@@ -135,7 +135,7 @@ echo "body    : $BODY  (in container: repo=$REPO_IN_CONTAINER, conda=$CONTAINER_
 echo "tool    : apptainer=${APPTAINER_BIN:-NOT FOUND (PATH and APPTAINER_BIN are empty)}"
 echo "probe   : PROBE=$PROBE   (1 = run the fork/spawn EGL probe before the preflight)"
 echo "jobs    : $JOBS"
-echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
+echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT sanity=${SANITY:-1} overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
 echo "ckpt    : $CKBPT_PATH"
 echo "data    : DATA_ROOT=$DATA_ROOT"

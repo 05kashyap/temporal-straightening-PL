@@ -32,7 +32,7 @@
 #     -h | --help    usage
 #   bash run_mpc.sh medium both gd_mpc --ckpt /path/to/ckpt_or_dir --seeds "100 101 102"
 #   bash run_mpc.sh <env>             # full faithful MPC (default)
-#   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate
+#   FULL=0 bash run_mpc.sh <env>      # validation: OOM check + time estimate + batch sanity
 #   OL=1 bash run_mpc.sh <env> all both   # OPEN LOOP: one plan per episode for the whole goal_H
 #   SEEDS="0 1 2" bash run_mpc.sh <env>  # FULL runs: one plan.py run per seed, report mean +/- std (default: 100 101 102)
 #   For every (model, planner), the multi-seed mean +/- std (and per-seed values for
@@ -333,6 +333,12 @@ S_GD_OPT=3
 S_CEM_SAMPLES=8
 S_CEM_OPT=2
 S_CEM_CHUNK=8
+# Batch sanity stage for FULL=0 (on by default; SANITY=0 skips it). n_evals is deliberately
+# larger than n_plot_samples (10) so that batch-dependent code really runs: the other stages
+# use n_evals=1 and chunk_size=1, which is exactly what let a chunk_size > n_plot_samples
+# IndexError in planning/evaluator.py survive validation and kill the full run.
+S_SANITY_N_EVALS="${S_SANITY_N_EVALS:-12}"
+SANITY="${SANITY:-1}"
 
 # --- open-loop budgets (OL=1) ------------------------------------------------
 # Same sub-planner budget as the closed-loop runs so OPEN vs CLOSED differs only
@@ -642,7 +648,7 @@ for model in "${MODELS_SEL[@]}"; do
                          planner.sub_planner.num_samples=1 \
                          planner.sub_planner.sample_chunk_size=1)
         fi
-        echo "  [1/3] setup measurement..."
+        echo "  [1/4] setup measurement..."
         t0=$(date +%s)
         run_plan "$planner" "$model" "plan_outputs_${planner}/validate_${model}_setup_gH${GOAL_H}" \
             "$S_N_EVALS" "$S_MAX_ITER" "${setup_extra[@]}" > "$log1" 2>&1
@@ -669,7 +675,7 @@ for model in "${MODELS_SEL[@]}"; do
                    planner.sub_planner.opt_steps="$S_CEM_OPT" \
                    planner.sub_planner.sample_chunk_size="$S_CEM_CHUNK")
         fi
-        echo "  [2/3] ${planner} smoke..."
+        echo "  [2/4] ${planner} smoke..."
         t0=$(date +%s)
         run_plan "$planner" "$model" "plan_outputs_${planner}/validate_${model}_smoke_gH${GOAL_H}" \
             "$S_N_EVALS" "$S_MAX_ITER" "${extra[@]}" > "$log2" 2>&1
@@ -689,9 +695,37 @@ for model in "${MODELS_SEL[@]}"; do
         fi
         echo "  smoke ok (${t_smoke}s)"
 
-        echo "  [3/3] estimate:"
+        echo "  [3/4] estimate:"
         estimate "$planner" "$model" "$t_setup" "$log2"
         print_full_cmd "$planner" "$model"
+
+        if [ "$SANITY" = "1" ]; then
+            echo "  [4/4] batch sanity: $S_SANITY_N_EVALS episodes at chunk_size=${CHUNK:-$S_CHUNK}, 1 iteration"
+            log3="plan_outputs_${planner}/validate_${model}_sanity.log"
+            if [ "$planner" = "gd_mpc" ]; then
+                sanity_extra=(planner.sub_planner.opt_steps=1)
+            else
+                sanity_extra=(planner.sub_planner.num_samples=8 planner.sub_planner.opt_steps=1 planner.sub_planner.sample_chunk_size=8)
+            fi
+            RUN_CHUNK="$CHUNK"       # the full run's chunking, not S_CHUNK=1
+            t0=$(date +%s)
+            run_plan "$planner" "$model" "plan_outputs_${planner}/validate_${model}_sanity_gH${GOAL_H}" "$S_SANITY_N_EVALS" "1" "${sanity_extra[@]}" > "$log3" 2>&1
+            rc3=$?
+            t1=$(date +%s)
+            unset RUN_CHUNK
+            if grep -qi 'OutOfMemoryError\|out of memory' "$log3"; then
+                echo "  !! OOM at n_evals=$S_SANITY_N_EVALS with chunk_size=$CHUNK: the full run"
+                echo "     would not fit either -- lower CHUNK (e.g. 8) and re-run this."
+                RC_FAILED=1
+                continue
+            fi
+            if [ $rc3 -ne 0 ]; then
+                echo "  !! batch sanity rc=$rc3 (see $log3) -- the full run would fail here too."
+                RC_FAILED=1
+                continue
+            fi
+            echo "  sanity ok ($((t1 - t0))s)"
+        fi
         echo
     done
 done
