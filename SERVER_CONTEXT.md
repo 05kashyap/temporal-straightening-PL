@@ -1150,6 +1150,14 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   candidate-rollout memory. Chunk size never changes the numbers (the divergence
   metrics are exact Frobenius norms under chunking); `n_evals` does, so keep it at 50.
   `DRY_RUN=1 bash run_scripts/run_mpc.sh ...` prints the resolved chunks and budgets.
+- **Submit it from the repo root** (`cd ~/wm/temporal-straightening-PL && sbatch
+  run_scripts/mpc_server.sh`). `sbatch` runs a *spool copy* of the script, so
+  `$BASH_SOURCE` points at `/opt/slurm/data/slurmd/job<N>/slurm_script` and cannot be
+  used to find the checkout; the script therefore looks for the repo via
+  `SLURM_SUBMIT_DIR` (where `sbatch` was invoked), then its own directory, then `$PWD`,
+  and fails with that advice if none of them contains `run_scripts/` (it also prints
+  the resolved `repo :` in its header). Clear `REPO_HOST=/path/to/repo` to override.
+  `train_server.sh` and `setup_mujoco_server.sh` have the same fallback.
 - The tables find those names too: `analysis/div_emb_tables.py` falls back to the
   same token-based discovery when the built-in names are absent, so
   `python3 analysis/div_emb_tables.py` (host python is enough -- it only reads

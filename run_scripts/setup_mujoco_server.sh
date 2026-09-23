@@ -22,7 +22,15 @@
 # =============================================================================
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# sbatch spools a copy of the script, so $BASH_SOURCE is useless there: prefer the
+# submission dir, then this script's dir, then $PWD (see mpc_server.sh).
+REPO="${REPO_HOST:-}"
+if [ -z "$REPO" ]; then
+    for _cand in "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" "$PWD"; do
+        if [ -n "$_cand" ] && [ -d "$_cand/run_scripts" ]; then REPO="$_cand"; break; fi
+    done
+    unset _cand
+fi
 SIF="${SIF:-/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif}"
 SCRATCH="${SCRATCH:-/scratch/akn7847}"
 OVERLAY="${OVERLAY:-$SCRATCH/containers/temporal-straightening/overlay-50G-10M.ext3}"

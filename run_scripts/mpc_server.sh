@@ -45,7 +45,23 @@
 #SBATCH --error=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.err
 set -euo pipefail
 
-REPO_HOST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Locate the checkout. When sbatch invokes this file it runs a *spool copy*
+# (/opt/slurm/data/slurmd/job<N>/slurm_script), so $BASH_SOURCE cannot be used to find the
+# repo: prefer SLURM_SUBMIT_DIR (where sbatch was called from), then the script's own path
+# for a direct `bash run_scripts/mpc_server.sh`, then $PWD. Override with REPO_HOST=...
+REPO_HOST="${REPO_HOST:-}"
+if [ -z "$REPO_HOST" ]; then
+    for _cand in "${SLURM_SUBMIT_DIR:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" "$PWD"; do
+        if [ -n "$_cand" ] && [ -f "$_cand/run_scripts/dataset_paths.sh" ]; then REPO_HOST="$_cand"; break; fi
+    done
+    unset _cand
+fi
+if [ -z "$REPO_HOST" ] || [ ! -f "$REPO_HOST/run_scripts/dataset_paths.sh" ]; then
+    echo "FATAL: cannot locate the repo (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>}, script dir, \$PWD=$PWD)." >&2
+    echo "       Submit from the repo root: cd ~/wm/temporal-straightening-PL && sbatch run_scripts/mpc_server.sh" >&2
+    echo "       (or export REPO_HOST=/path/to/temporal-straightening-PL)." >&2
+    exit 1
+fi
 SIF="${SIF:-/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif}"
 OVERLAY="${OVERLAY:-/scratch/akn7847/containers/temporal-straightening/overlay-50G-10M.ext3}"
 REPO_IN_CONTAINER="${REPO_IN_CONTAINER:-/home/akn7847/wm/temporal-straightening-PL}"
@@ -76,6 +92,7 @@ if ! mkdir -p "$CKPT_ROOT/logs" 2>/dev/null; then
 fi
 echo "==================== $(date '+%F %H:%M:%S') ===================="
 echo "host=$(hostname) job=${SLURM_JOB_ID:-local} gpu=$(nvidia-smi -L 2>/dev/null | head -1)"
+echo "repo    : $REPO_HOST"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT overlay=$MOUNT"
 echo "chunk   : closed=$CHUNK open=$OL_CHUNK cem=$CEM_CHUNK   (null = no chunking)"
@@ -95,8 +112,8 @@ source /opt/miniconda/etc/profile.d/conda.sh
 conda activate ts
 [ -r "$ENV_FILE" ] || { echo "FATAL: $ENV_FILE not visible in the container -- add --bind \$HOME:\$HOME" >&2; exit 9; }
 source "$ENV_FILE"
-cd "$REPO_IN_CONTAINER"
-source run_scripts/dataset_paths.sh
+cd "$REPO_IN_CONTAINER" || { echo "FATAL: $REPO_IN_CONTAINER is not visible in the container" >&2; exit 1; }
+source run_scripts/dataset_paths.sh || { echo "FATAL: run_scripts/dataset_paths.sh missing under $REPO_IN_CONTAINER -- is REPO_IN_CONTAINER right?" >&2; exit 1; }
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 log_dir="$CKPT_ROOT/logs"
 mkdir -p "$log_dir"

@@ -108,6 +108,8 @@ if [[ -f "$SCRIPT_DIR/../train.py" ]]; then
     REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 elif [[ -f "$SCRIPT_DIR/train.py" ]]; then
     REPO="$SCRIPT_DIR"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "$SLURM_SUBMIT_DIR/train.py" ]]; then
+    REPO="$SLURM_SUBMIT_DIR"     # sbatch runs a spool copy; submit from the repo
 elif [[ -f "$PWD/train.py" ]]; then
     REPO="$PWD"
 else
