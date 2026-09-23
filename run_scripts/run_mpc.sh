@@ -310,9 +310,13 @@ case "$PLANNER_SEL" in
 esac
 
 # --- faithful (full) and smoke budgets ---------------------------------------
-FULL_N_EVALS=50
-FULL_MAX_ITER=20        # safety cap; the loop exits on success (~5 iters for a 25-step goal)
-GD_OPT=100              # paper Table 4
+# Overridable so a paper-parity run needs no edit: FULL_N_EVALS=50 GD_OPT=100 come from the
+# paper's Table 4, and conf/plan_gd_mpc.yaml's own default is max_iter=4 (sized for a
+# goal_H=19 horizon). max_iter is a CAP: the loop exits as soon as the episode succeeds,
+# which takes ~5 iters for goal_H=25 (25 / n_taken_actions=5).
+FULL_N_EVALS="${FULL_N_EVALS:-50}"
+FULL_MAX_ITER="${FULL_MAX_ITER:-20}"
+GD_OPT="${GD_OPT:-100}"              # paper Table 4
 CEM_SAMPLES=200         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
 CEM_OPT=10              # plan_mpc_cem.yaml default
 CEM_CHUNK="${CEM_CHUNK:-50}"   # CEM sample_chunk_size; "null" rolls every candidate at once
