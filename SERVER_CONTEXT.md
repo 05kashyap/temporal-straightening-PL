@@ -1160,6 +1160,28 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   and fails with that advice if none of them contains `run_scripts/` (it also prints
   the resolved `repo :` in its header). Clear `REPO_HOST=/path/to/repo` to override.
   `train_server.sh` and `setup_mujoco_server.sh` have the same fallback.
+- **If a job dies instantly, run the self-test before resubmitting**:
+  `bash run_scripts/selftest_mpc_server.sh` (login node, ~5 s, no GPU, no container: it
+  stubs apptainer/conda/`run_mpc.sh`). The wrapper writes the in-container script as
+  *preamble of `export VALUE=...` lines, then the body*; the body runs under `set -u`, so
+  a preamble that ends up after the body's first use of a value kills the job inside the
+  container. That is exactly how `.ts_mpc_body.sh: line 7: ENV_FILE: unbound variable`
+  happened once: the exports were appended with `>>` *after* the body's `exit "$rc"`, so
+  they never executed. The wrapper now emits the preamble first **and** lints the
+  generated file before starting apptainer (`PREAMBLE_VARS` drives both, so they cannot
+  drift): every name must be exported before the first line that uses it. The check runs
+  under `DRY_RUN=1` as well, so `DRY_RUN=1 bash run_scripts/mpc_server.sh` is a real
+  preflight -- it lints *and* prints. `tests/test_mpc_body.py` pins all of this down,
+  including the historical layout, which must still fail (7 checks, `pytest tests/`).
+- Two container-side overrides worth knowing: `CONTAINER_CONDA` (default
+  `/opt/miniconda`) and `CONDA_ENV` (default `ts`) select the conda to source and the env
+  to activate inside the image, and `REPO_IN_CONTAINER` is now *derived* from the
+  resolved `REPO_HOST` when the checkout is under `$HOME` (which is bound 1:1 into the
+  container) -- the hardcoded `/home/akn7847/wm/...` remains only as the fallback for a
+  checkout outside `$HOME`. The header prints all of it on the `body :` line.
+- The wrapper deliberately avoids `... | head -1` inside command substitutions: under
+  `set -o pipefail` an early exit gives the upstream process SIGPIPE, the pipeline is
+  non-zero, and `set -e` turns that into a silent exit-1 in the middle of the script.
 - The tables find those names too: `analysis/div_emb_tables.py` falls back to the
   same token-based discovery when the built-in names are absent, so
   `python3 analysis/div_emb_tables.py` (host python is enough -- it only reads
@@ -1178,6 +1200,9 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `Read-only file system: .../mujoco_py/generated/mujocopy-buildlock` | the run used `--check` (`:ro`); the first import must write there -> run without `--check` in a gap between training jobs |
 | `undefined symbol: __glewBindBuffer` | informational for the standalone loader test (cymj links glew itself). If the *cymj import* raises it: `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` |
 | `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
+| `.ts_mpc_body.sh: line N: ENV_FILE: unbound variable` (any `unbound variable`) | the generated body used a value before the preamble exported it (the exports were once appended after the body's `exit "$rc"`). Fixed by writing the preamble first; the wrapper now refuses to start apptainer if that inverts. Verify: `bash run_scripts/selftest_mpc_server.sh` |
+| header prints, then the job exits 1 with **no** message | a pipeline under `set -o pipefail` whose first stage dies of SIGPIPE (`... \| head -1`): `set -e` aborts silently. The wrapper avoids that pattern (see 11.3) |
+| `FATAL: ENV_FILE=... is not readable here` | `~/mujoco_env.sh` is not on this machine: run `run_scripts/setup_mujoco_server.sh` (11.1), or point `ENV_FILE` at your own copy |
 | `error: passing argument 1 of ... from incompatible pointer type` | GCC >= 14 promotes it: run `python run_scripts/patch_mujoco_py.py` (adds `-Wno-incompatible-pointer-types` + `-DGLEW_NO_GLU`) |
 | `Missing path to your environment variable … :None` | `get_nvidia_lib_dir()` returned None: `patch_mujoco_py.py` adds `/.singularity.d/libs` and creates `/usr/local/nvidia/lib64` |
 | `fatal error: GL/osmesa.h` / `linuxcpuextensionbuilder` | the CPU builder was selected: same patch (GPU/EGL), or `MUJOCO_PY_FORCE_CPU=1 MUJOCO_GL=osmesa` with OSMesa from conda |
