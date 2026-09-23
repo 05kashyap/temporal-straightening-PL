@@ -63,6 +63,9 @@
 
 cd "$(dirname "$0")"
 source setup.sh
+# The shared DINO-WM layout (DATA_ROOT per env, CKPT_ROOT/ART_ROOT); the smoke test
+# and train_server.sh read the same file.
+source dataset_paths.sh
 PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 WANDB_MODE="${WANDB_MODE:-offline}"
@@ -272,6 +275,17 @@ if [ -n "${ARM_NAMES:-}" ]; then
     MODELS=("${_arm_names[@]}")
     unset _arm_names
 fi
+# Datasets: plan.py reads $DATASET_DIR/<env> and the three datasets are nested
+# differently, so DATASET_DIR is per-env (dataset_paths.sh mirrors the exact path
+# training gets via env.dataset.data_path). This replaces setup.sh's laptop
+# default ($PWD/data/datasets) when the server layout is present; override by
+# exporting DATA_ROOT=/path/to/worldmodeldata.
+_mpr_data="$(data_dir_for "$ENV_SEL")"
+if [ -n "$_mpr_data" ] && [ -d "$_mpr_data" ]; then
+    export DATASET_DIR="$(dataset_dir_for "$ENV_SEL")"
+fi
+unset _mpr_data
+
 # --- variant / planner selection ---------------------------------------------
 case "$VARIANT" in
     all)        IDX=(0 1 2 3) ;;
@@ -448,6 +462,7 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
 }
 # --- run ----------------------------------------------------------------------
 echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL OL=$OL ==="
+echo "=== data: DATASET_DIR=$DATASET_DIR  (DATA_ROOT=${DATA_ROOT:-<default>}) ==="
 if [ "$DIRECT_CKBPT" = "1" ]; then
     echo "direct-checkpoint mode: running MPC on $CKBPT"
     model="$(basename "$CKBPT")"

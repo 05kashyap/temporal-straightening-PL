@@ -132,15 +132,17 @@ done
 # ─── EDIT ME ────────────────────────────────────────────────────────────────
 # The only paths you should need to touch on a new machine. (Each can also be
 # overridden from the environment, but editing the strings here is enough.)
-SCRATCH="${SCRATCH:-/scratch/akn7847}"          # NYU Torch scratch root
-DATA_ROOT="$SCRATCH/datasets/worldmodeldata"    # holds point_maze/ point_maze_medium/ pusht/
+# The data layout lives in run_scripts/dataset_paths.sh so training, planning and
+# the smoke test cannot disagree about it (it also provides data_dir_for /
+# dataset_dir_for, which PLANNING needs because the three datasets are nested
+# differently: $DATA_ROOT/point_maze/point_maze vs $DATA_ROOT/point_maze_medium).
+# Override SCRATCH / DATA_ROOT / CKPT_ROOT / ART_ROOT from the environment.
+source "$SCRIPT_DIR/dataset_paths.sh"
 
-DATA_DIR_umaze="$DATA_ROOT/point_maze/point_maze"    # states.pth, actions.pth, seq_lengths.pth, obses/
-DATA_DIR_medium="$DATA_ROOT/point_maze_medium"       # same layout as umaze
-DATA_DIR_pusht="$DATA_ROOT/pusht/pusht_noise"        # train/ and val/
-
-CKPT_ROOT="${CKPT_ROOT:-$SCRATCH/datasets/worldmodelcheckpoints}"   # training run dirs (ckpts + logs + recon PNGs)
-ART_ROOT="${ART_ROOT:-$SCRATCH/datasets/worldmodelart}"             # decoded videos / plan outputs (planning stage)
+DATA_DIR_umaze="$(data_dir_for umaze)"      # states.pth, actions.pth, seq_lengths.pth, obses/
+DATA_DIR_medium="$(data_dir_for medium)"    # same layout as umaze
+DATA_DIR_pusht="$(data_dir_for pusht)"      # train/ and val/
+# CKPT_ROOT (training run dirs) and ART_ROOT (plan outputs) come from the helper.
 # CKPT_ROOT keeps the literal "checkpoints/" substring on purpose: train.py derives
 # the wandb run name as saved_folder.split("checkpoints/")[-1] (train.py L38). The
 # nesting also means `checkpoints/` (gitignored) keeps server runs out of git, and

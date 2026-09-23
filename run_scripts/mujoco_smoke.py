@@ -39,6 +39,7 @@ Exit code 0 only if every required stage passed.
 """
 
 import os
+import pathlib
 import sys
 import traceback
 
@@ -58,7 +59,9 @@ def check(name, fn, required=True, hints=()):
         detail = fn()
     except BaseException as exc:  # noqa: BLE001 - a smoke test reports everything
         tb = traceback.format_exc(limit=8)
-        print(tb)
+        lines = tb.splitlines()
+        # a failed cymj compile dumps hundreds of lines: keep the tail
+        print(tb if len(lines) <= 30 else "\n".join(lines[-22:]))
         last = tb.strip().splitlines()[-1]
         blob = (tb + str(exc)).lower()
         extra = []
@@ -89,7 +92,8 @@ def stage_environment():
     """Report (never fail) the variables the rest of the test depends on."""
     keys = ["MUJOCO_PY_MUJOCO_PATH", "MUJOCO_GL", "PYOPENGL_PLATFORM", "EGL_GPU",
             "LD_LIBRARY_PATH", "DISPLAY", "CUDA_VISIBLE_DEVICES", "DATASET_DIR",
-            "MUJOCO_LD_MODE", "PYTHON"]
+            "MUJOCO_LD_MODE", "PYTHON", "MUJOCO_PY_FORCE_CPU",
+            "DATA_ROOT", "CKPT_ROOT"]
     for k in keys:
         print("   %-22s %s" % (k, os.environ.get(k, "<unset>")))
     mj = os.environ.get("MUJOCO_PY_MUJOCO_PATH",
@@ -156,6 +160,71 @@ def stage_load_lib():
                        "libraries present")
 
 
+def stage_toolchain():
+    """Informational: what the cymj build will use.
+
+    cymj is compiled on first import, so these decide whether that succeeds: Cython
+    must be 0.29.x (mujoco-py 2.1.2.14 predates Cython 3 -- environment.yaml pins
+    0.29.37), gcc >= 14 turns -Wincompatible-pointer-types into a hard error (hence the
+    patch below), and the builder that gets selected depends on the driver-lib
+    directory, NOT on MUJOCO_GL.
+    """
+    import re
+    import subprocess
+    try:
+        cy = subprocess.check_output(
+            [sys.executable, "-c", "import Cython; print(Cython.__version__)"],
+            stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        cy = "MISSING"
+    gcc = subprocess.run("gcc -dumpversion", shell=True, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL).stdout.decode().strip() or "?"
+    on_path = subprocess.call("type nvidia-smi", shell=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    print("   python         %s" % sys.executable)
+    print("   Cython         %s" % cy)
+    print("   gcc            %s" % gcc)
+    print("   nvidia-smi     %s" % ("on PATH" if on_path else
+                                     "absent (fine with the builder patch below)"))
+    for c in ("/usr/local/nvidia/lib64", "/usr/lib/nvidia", "/.singularity.d/libs"):
+        print("   %-14s %s" % (c, "exists" if os.path.isdir(c) else "missing"))
+    if cy != "MISSING" and int(cy.split(".")[0]) >= 3:
+        raise RuntimeError("Cython %s is too new for mujoco-py 2.1.2.14: "
+                           "pip install cython==0.29.37, then remove cymj.c + "
+                           "generated/_pyxbld_* and import again" % cy)
+    m = re.match(r"(\d+)", gcc)
+    if m and int(m.group(1)) >= 14:
+        return "Cython %s, gcc %s (needs the -Wno-incompatible-pointer-types patch)" % (cy, gcc)
+    return "Cython %s, gcc %s" % (cy, gcc)
+
+
+def stage_patches():
+    """Are run_scripts/patch_mujoco_py.py's edits present in site-packages?
+
+    Required on GCC >= 14 and inside the container; where mujoco_py already imports
+    (nvidia-smi present, gcc <= 13) a missing patch is only a warning.
+    """
+    import mujoco_py
+    b = pathlib.Path(mujoco_py.__file__).parent / "builder.py"
+    src = b.read_text()
+    have = {
+        "compile flags": "-DGLEW_NO_GLU" in src,
+        "gpu builder": ("patched: GPU/EGL" in src) or ("patched: always use the GPU" in src),
+        "driver lib dir": "patched: container driver libs" in src,
+    }
+    for k, v in have.items():
+        print("   %-16s %s" % (k, "present" if v else "MISSING"))
+    if not any(have.values()):
+        raise RuntimeError("mujoco_py has none of the local patches -- run "
+                           "'python run_scripts/patch_mujoco_py.py' (see its --help)")
+    missing = [k for k, v in have.items() if not v]
+    if missing:
+        print("   note: %s not applied -- run run_scripts/patch_mujoco_py.py if the "
+              "import below picks the CPU builder" % ", ".join(missing))
+    return "patches: %s" % ", ".join("%s=%s" % (k, "yes" if v else "no")
+                                      for k, v in have.items())
+
+
 def stage_gym_envs():
     """`import env` registers the ids plan.py / conf/env/*.yaml ask for."""
     import gym
@@ -206,68 +275,61 @@ def stage_render():
     return "offscreen render %s via %s" % (img.shape, mode)
 
 
-DATA_REQUIRED = {                       # what each loader reads (datasets/*_dset.py)
-    "point_maze": ["states.pth", "actions.pth", "seq_lengths.pth"],
-    "point_maze_medium": ["states.pth", "actions.pth", "seq_lengths.pth"],
-    "pusht_noise": ["states.pth", "seq_lengths.pkl"],
+# Per-env data layout, mirroring run_scripts/dataset_paths.sh -- the single source of
+# truth shared with train_server.sh / run_mpc.sh. The three datasets are NOT nested the
+# same way, and plan.py asks for $DATASET_DIR/<env>, so DATASET_DIR differs per env
+# (which is why one DATASET_DIR cannot serve all of them).
+LAYOUT = {
+    "point_maze": ("point_maze/point_maze",
+                   ["states.pth", "actions.pth", "seq_lengths.pth"], ["obses"], []),
+    "point_maze_medium": ("point_maze_medium",
+                          ["states.pth", "actions.pth", "seq_lengths.pth"], ["obses"], []),
+    "pusht_noise": ("pusht/pusht_noise", ["states.pth", "seq_lengths.pkl"], ["obses"],
+                    ["rel_actions.pth", "abs_actions.pth"]),
 }
-DATA_ANY_OF = {"pusht_noise": ["rel_actions.pth", "abs_actions.pth"]}
-DATA_DIRS = ["obses"]
 
 
-def _dataset_ok(path):
+def _dataset_ok(path, required, dirs, any_of):
     """True when `path` is the directory the dataset loader actually reads."""
-    for name in DATA_REQUIRED.get(_dataset_ok.env, []):
-        if not os.path.isfile(os.path.join(path, name)):
-            return False
-    any_of = DATA_ANY_OF.get(_dataset_ok.env, [])
-    if any_of and not any(os.path.isfile(os.path.join(path, n)) for n in any_of):
+    if not all(os.path.isfile(os.path.join(path, f)) for f in required):
         return False
-    return all(os.path.isdir(os.path.join(path, d)) for d in DATA_DIRS)
+    if any_of and not any(os.path.isfile(os.path.join(path, f)) for f in any_of):
+        return False
+    return all(os.path.isdir(os.path.join(path, d)) for d in dirs)
 
 
 def stage_planning_inputs():
-    """Warn-only: what a real plan.py run still needs (datasets + checkpoints).
+    """Warn-only: the datasets a real plan.py run needs, per env, plus checkpoints.
 
-    Checks the *layout*, not just the directory names: plan.py reads
-    `$DATASET_DIR/<env>` via datasets/*_dset.py, which loads states.pth etc. and an
-    obses/ directory (pusht additionally rel_actions.pth|abs_actions.pth and
-    seq_lengths.pkl). A dataset unpacked one level too deep (…/point_maze/point_maze)
-    is detected and the exact DATASET_DIR to export is printed.
+    plan.py reads `$DATASET_DIR/<env>` via datasets/*_dset.py, which loads states.pth
+    etc. plus an obses/ directory (pusht additionally rel_actions.pth|abs_actions.pth
+    and seq_lengths.pkl). DATASET_DIR is the *parent* of the data directory and is
+    therefore per env -- the value to export is printed next to each env below.
     """
     missing = []
-    dset = os.environ.get("DATASET_DIR")
-    envs = ("point_maze", "point_maze_medium", "pusht_noise")
-    if not dset:
-        missing.append("DATASET_DIR is unset (plan.py reads $DATASET_DIR/<env>)")
-    elif not os.path.isdir(dset):
-        missing.append("DATASET_DIR=%s does not exist" % dset)
+    root = os.environ.get("DATA_ROOT")
+    if not root:
+        missing.append("DATA_ROOT is unset (dataset_paths.sh default: "
+                       "$SCRATCH/datasets/worldmodeldata)")
+    elif not os.path.isdir(root):
+        missing.append("DATA_ROOT=%s does not exist" % root)
     else:
-        print("   DATASET_DIR  %s" % dset)
-        for env_name in envs:
-            _dataset_ok.env = env_name
-            cand = os.path.join(dset, env_name)
-            if _dataset_ok(cand):
-                print("   %-18s ok" % env_name)
-                continue
-            deeper = os.path.join(cand, env_name)
-            if _dataset_ok(deeper):
-                print("   %-18s one level deeper -> %s" % (env_name, deeper))
-                missing.append("%s is at %s, so export DATASET_DIR=%s"
-                               % (env_name, deeper, cand))
-            elif os.path.isdir(cand):
-                wanted = ", ".join(DATA_REQUIRED[env_name] + DATA_DIRS)
-                have = sorted(os.listdir(cand))[:6]
-                print("   %-18s present but incomplete: %s" % (env_name, cand))
-                missing.append("%s has no %s (found: %s)"
-                               % (env_name, wanted, ", ".join(have)))
+        print("   DATA_ROOT  %s" % root)
+        for env_name, (rel, required, dirs, any_of) in LAYOUT.items():
+            data = os.path.join(root, rel)
+            if _dataset_ok(data, required, dirs, any_of):
+                print("   %-18s ok      DATASET_DIR=%s" % (env_name, os.path.dirname(data)))
+            elif os.path.isdir(data):
+                have = ", ".join(sorted(os.listdir(data))[:5])
+                print("   %-18s incomplete" % env_name)
+                missing.append("%s lacks %s (has: %s)"
+                               % (data, ", ".join(required + dirs), have))
             else:
-                print("   %-18s MISSING" % env_name)
-                missing.append("%s not found under %s" % (env_name, dset))
-    ckpt = os.environ.get("CKBPT") or "checkpoints/test"
+                print("   %-18s MISSING %s" % (env_name, data))
+                missing.append("%s not found -- check DATA_ROOT" % data)
+    ckpt = os.environ.get("CKBPT") or os.environ.get("CKPT_ROOT") or "checkpoints/test"
     if not os.path.isdir(ckpt):
-        missing.append("no checkpoint dir at %s (run_mpc.sh defaults to the laptop "
-                       "path checkpoints/test -- pass --ckpt $CKPT_ROOT/test)" % ckpt)
+        missing.append("no checkpoint dir at %s (run_mpc.sh needs --ckpt $CKPT_ROOT/test)" % ckpt)
     else:
         arms = sorted(d for d in os.listdir(ckpt)
                       if os.path.isdir(os.path.join(ckpt, d)))
@@ -278,9 +340,8 @@ def stage_planning_inputs():
         if not ready:
             missing.append("no <run dir>/checkpoints/model_latest.pth under %s" % ckpt)
     for m in missing:
-        print("   !! %s" % m)
-    return ("warnings: %d" % len(missing)) if missing \
-        else "datasets and checkpoints look right"
+        print("   sleep 2; cat /tmp/nw11.txt %s" % m)
+    return ("warnings: %d" % len(missing)) if missing else "datasets and checkpoints look right"
 
 
 def main():
@@ -294,6 +355,8 @@ def main():
 
     print("mujoco smoke test  repo=%s  python=%s" % (REPO, sys.executable))
     check("environment (reported)", stage_environment)
+    check("toolchain (Cython / gcc / driver dirs)", stage_toolchain)
+    check("mujoco_py patches applied", stage_patches, required=False)
     check("torch import, with the MuJoCo paths set", stage_torch,
           hints=["if this fails with a stdc++/GL symbol error, the MuJoCo bin dir "
                  "is shadowing conda's libs -> export MUJOCO_LD_MODE=append"])

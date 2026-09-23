@@ -1025,6 +1025,26 @@ the build in a gap.
   failure. If the `cymj` import ever fails with an undefined `glewBindBuffer` symbol,
   prefix `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` (the loader line names
   the file that works).
+- **mujoco_py needs three local patches here, and the repo scripts them now**:
+  `run_scripts/patch_mujoco_py.py` adds (1) the GCC >= 14 compile flags
+  (`-Wno-incompatible-pointer-types` etc. + `-DGLEW_NO_GLU`), (2) forcing the
+  `LinuxGPUExtensionBuilder` (EGL) unless `MUJOCO_PY_FORCE_CPU` is set -- upstream
+  decides via `nvidia-smi`, which does not exist inside apptainer, and the CPU
+  builder then needs `GL/osmesa.h` that cannot be installed here -- and (3) a
+  `get_nvidia_lib_dir()` that returns a directory which really exists
+  (`/usr/local/nvidia/lib64`, `/usr/lib/nvidia`, `/.singularity.d/libs`).
+  `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` does all of it plus the
+  Cython pin, the `generated/` check and a clean rebuild (needs a rw overlay).
+- **`mujoco_py/generated/` holds shipped SOURCES** (`__init__.py`, `const.py`,
+  `wrappers.pxi`, which `cymj.pyx` includes). Cleaning a build must delete only
+  `cymj.c`, `generated/*.so` and `generated/_pyxbld_*`; `rm -rf generated` breaks the
+  package (restore with `pip install --no-cache-dir --force-reinstall --no-deps
+  mujoco-py==2.1.2.14`).
+- **`apt` cannot be used in this image** (the SIF root is read-only and apt cannot
+  write `/var/lib/apt`): install anything extra with `pip`/`conda` in the overlay.
+- **Inside the container `$HOME` is `/root`** (fakeroot), so never build
+  container-side paths from `$HOME`; the bound home is an absolute path like
+  `/home/akn7847/...`, and `--bind "$HOME:$HOME"` is what makes it visible.
 
 ### 11.2 Acceptance test
 
@@ -1035,7 +1055,13 @@ loader -> `import env` registers point_maze/point_maze_medium/pusht/wall ->
 `gym.make("point_maze")` reset+step -> offscreen render (EGL/GLFW) -> `DATASET_DIR` and
 checkpoint paths (warn only). The `libmujoco210.so` loader line is informational (see
 11.1 on glew); the required stages are torch, cymj, env registration, make/step and the
-render. Exit 0 = the planning stage can run here. Verified on the
+render. The two stages before the import report what decides the build: the
+toolchain (Cython / gcc / nvidia-smi / the three driver-lib dirs; Cython >= 3 is a
+hard failure with the pin as the fix) and which of the three mujoco_py patches are
+present. The last stage is per env: `DATA_ROOT` comes from
+`run_scripts/dataset_paths.sh` and the correct `DATASET_DIR` is printed for every
+env (`$DATA_ROOT/point_maze` for umaze, `$DATA_ROOT` for medium, `$DATA_ROOT/pusht`
+for pusht). Exit 0 = the planning stage can run here. Verified on the
 laptop in both modes: GLFW `var=1443`, EGL `var=1414` (`Found 4 GPUs for rendering.
 Using device 0`).
 
@@ -1086,6 +1112,15 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   readable) and `--overlay "$OVERLAY:ro"`. Planning only *reads* the overlay, so a
   read-only mount is safe and avoids fighting a training job that holds it read-write;
   only the one-time cymj build needs write access.
+- **No data/env exports needed**: the driver sources the shared layout, and
+  `run_mpc.sh` derives `DATASET_DIR` per env from `DATA_ROOT` itself (printing
+  `data: DATASET_DIR=...` in its header). Override `DATA_ROOT=` on the command line or
+  pass `--data-root=DIR` to the driver. `ARM_NAMES` / `--arms-from-ckpt` remains the
+  only per-cluster input for MPC (these checkpoints use `projchannel`/`ttagg…`/
+  `aggflatten` names rather than the built-in dev names).
+- Recovery: if `import mujoco_py` ever regresses, run
+  `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` (Cython pin + patch +
+  clean rebuild in one command).
 
 ### 11.4 Failure -> fix
 
@@ -1098,7 +1133,12 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | `Read-only file system: .../mujoco_py/generated/mujocopy-buildlock` | the run used `--check` (`:ro`); the first import must write there -> run without `--check` in a gap between training jobs |
 | `undefined symbol: __glewBindBuffer` | informational for the standalone loader test (cymj links glew itself). If the *cymj import* raises it: `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` |
 | `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
-| `datasets 0 of 3 found in ...` | `DATASET_DIR` must point at the DINO-WM root that *contains* `point_maze`, `point_maze_medium`, `pusht_noise` -- the generated env file guesses `$SCRATCH/datasets`; override it (`export DATASET_DIR=...` before `run_mpc.sh`) |
+| `error: passing argument 1 of ... from incompatible pointer type` | GCC >= 14 promotes it: run `python run_scripts/patch_mujoco_py.py` (adds `-Wno-incompatible-pointer-types` + `-DGLEW_NO_GLU`) |
+| `Missing path to your environment variable … :None` | `get_nvidia_lib_dir()` returned None: `patch_mujoco_py.py` adds `/.singularity.d/libs` and creates `/usr/local/nvidia/lib64` |
+| `fatal error: GL/osmesa.h` / `linuxcpuextensionbuilder` | the CPU builder was selected: same patch (GPU/EGL), or `MUJOCO_PY_FORCE_CPU=1 MUJOCO_GL=osmesa` with OSMesa from conda |
+| `'generated/wrappers.pxi' not found` | `mujoco_py/generated/` was deleted: restore with `pip install --no-cache-dir --force-reinstall --no-deps mujoco-py==2.1.2.14` |
+| `Permission denied` from `apt-get` | apt cannot write `/var/lib/apt` in this image; use pip/conda |
+| a `data/datasets`-style path in an error | `DATASET_DIR` is per env -- `run_mpc.sh` sets it from `DATA_ROOT`; check the `data: DATASET_DIR=...` line in its header |
 | `glfw`/window error, no DISPLAY | `MUJOCO_GL=egl` + `PYOPENGL_PLATFORM=egl` (auto-set when `DISPLAY` is empty) |
 | `d4rl` warnings about mjrl/flow/carla | harmless; `D4RL_SUPPRESS_IMPORT_ERROR=1` silences them. **No d4rl hdf5 is downloaded** -- the `dataset_url` kwargs are never used (no `get_dataset()` call in the repo) |
 | `plan.py` cannot find data | `DATASET_DIR` must contain `point_maze`, `point_maze_medium`, `pusht_noise` (the generated env file points it at `$SCRATCH/datasets`; override if yours differs) |
