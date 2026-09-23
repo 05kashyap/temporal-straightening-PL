@@ -66,8 +66,13 @@ def check(name, fn, required=True, hints=()):
         blob = (tb + str(exc)).lower()
         extra = []
         if "read-only file system" in blob or "permission denied" in blob:
-            extra.append("the cymj build needs a WRITABLE overlay: mount it as "
-                         "--overlay $OVERLAY (no ':ro') for this run")
+            extra.append("mujoco_py needs a WRITABLE overlay on every import, not only the "
+                         "first: it takes a write lock next to cymj*.so "
+                         "(mujoco_py/generated/mujocopy-buildlock) before it even looks at "
+                         "the cache, so ':ro' fails here even with cymj already built")
+            extra.append("with run_scripts/mpc_server.sh that is OVERLAY_RW=1; otherwise "
+                         "drop ':ro' from the --overlay flag -- and do not run two jobs "
+                         "against the same writable overlay at once")
         if ("mujoco210" in blob or "libmujoco210" in blob
                 or "cannot open shared object" in blob):
             extra.append("check MUJOCO_PY_MUJOCO_PATH and that LD_LIBRARY_PATH "
@@ -362,8 +367,9 @@ def main():
                  "is shadowing conda's libs -> export MUJOCO_LD_MODE=append"])
     check("mujoco_py import (builds cymj on first use)", stage_mujoco_py,
           hints=["a compile error means no compiler/patchelf/GL headers in the env, "
-                 "or the overlay is read-only for this run (the first import "
-                 "writes mujoco_py/generated/)",
+                 "or the overlay is read-only: mujoco_py takes a write lock in "
+                 "mujoco_py/generated/ on EVERY import, so ':ro' always fails here "
+                 "(use OVERLAY_RW=1)",
                  "an undefined-symbol error for glewBindBuffer needs "
                  "LD_PRELOAD=<glew .so> (the loader stage prints which one)"])
     check("libmujoco210.so loader (informational)", stage_load_lib,

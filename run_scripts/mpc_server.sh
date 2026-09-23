@@ -30,9 +30,11 @@
 #
 # Preflight (PREFLIGHT=1, the default) runs run_scripts/mujoco_smoke.py in the same
 # container first, so a broken simulator/dataset/EGL fails in seconds instead of after
-# plan.py's startup. The first run of a *new* machine may also want OVERLAY_RW=1 (the
-# first import of mujoco_py compiles cymj into the overlay); afterwards read-only is
-# enough and can share the node with a training job.
+# plan.py's startup. OVERLAY_RW=1 is needed for every planning run, not just the first:
+# mujoco_py takes a write lock (fasteners.InterProcessLock) next to cymj*.so on *every*
+# `import mujoco_py`, before it checks whether cymj is already built, so the default ':ro'
+# mount fails there (OSError .../mujocopy-buildlock). Corollary: do not run this while
+# another job holds the same overlay read-write.
 #
 # Edit the #SBATCH lines for your account/partition if they differ.
 # =============================================================================
@@ -109,6 +111,9 @@ fi
 unset _cpus
 CKBPT_PATH="${CKBPT:-$CKPT_ROOT/test}"
 MOUNT="$OVERLAY:ro"; [ "${OVERLAY_RW:-0}" = "1" ] && MOUNT="$OVERLAY"
+# The body reports a read-only mount when the preflight fails: that alone is fatal for
+# `import mujoco_py` (see the note above), so it is passed along with the values.
+OVERLAY_RO=0; case "$MOUNT" in *:ro) OVERLAY_RO=1 ;; esac
 if [ "$#" -ge 2 ]; then
     JOBS="$1:$2:${3:-both}"
 else
@@ -166,7 +171,7 @@ esac
 # never executed at all. PREAMBLE_VARS is the single source of truth here: it drives both
 # the export block and the ordering check further down, so the two cannot drift apart.
 PREAMBLE_VARS=(REPO_IN_CONTAINER CONTAINER_CONDA CONDA_ENV FULL OL SEEDS PREFLIGHT JOBS
-               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX)
+               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO)
 OL_SUFFIX=""
 if [ "$OL" = "1" ]; then OL_SUFFIX=".ol"; fi
 
@@ -195,6 +200,12 @@ if [ "$PREFLIGHT" = "1" ]; then
     echo "---- preflight: mujoco / gym / EGL / datasets ----"
     python run_scripts/mujoco_smoke.py || {
         echo "FATAL: preflight failed -- not starting plan.py (fix the stage above)." >&2
+        if [ "$OVERLAY_RO" = "1" ]; then
+            echo "       NOTE: the overlay is mounted read-only for this run, and mujoco_py takes a" >&2
+            echo "       write lock next to cymj*.so on EVERY import -- so ':ro' fails there even with" >&2
+            echo "       cymj already built. If the failing stage mentions mujocopy-buildlock:" >&2
+            echo "       OVERLAY_RW=1 sbatch run_scripts/mpc_server.sh" >&2
+        fi
         exit 1
     }
 fi

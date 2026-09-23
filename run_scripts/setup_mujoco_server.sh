@@ -137,15 +137,19 @@ echo "wrote $ENV_FILE   (MUJOCO_LD_MODE=$MUJOCO_LD_MODE, MUJOCO_GL=egl, PYTHON d
 # is visible inside the container while a file written next to it (such as
 # ~/mujoco_env.sh) is NOT, and sourcing it fails with "No such file or directory".
 # Add the same flag to your own interactive / slurm container runs.
+# There is no read-only variant of this stack: mujoco_py takes a write lock
+# (fasteners.InterProcessLock) next to cymj*.so on *every* `import mujoco_py`, before it
+# checks whether cymj is already built, so a ':ro' overlay fails at that import even when
+# nothing needs compiling. --check therefore mounts the overlay read-write as well; the
+# only thing it changes is that --fix-mujoco-py is refused.
 MOUNT=(--fakeroot --nv --bind "$HOME:$HOME" --overlay "$OVERLAY")
 if [ "$CHECK_ONLY" = "1" ]; then
-    MOUNT=(--fakeroot --nv --bind "$HOME:$HOME" --overlay "$OVERLAY:ro")
-    echo "  (--check: read-only overlay, so no cymj build -- works once it is built)"
+    echo "  (--check: smoke test only; the overlay is read-write, as every run needs)"
 fi
 
 echo
 echo "=== container : $SIF"
-echo "=== overlay   : $OVERLAY$([ "$CHECK_ONLY" = "1" ] && echo ' (:ro)')"
+echo "=== overlay   : $OVERLAY (read-write: mujoco_py takes a write lock on every import)"
 echo "=== env file  : $ENV_FILE"
 echo "=== repo      : $REPO_IN_CONTAINER"
 

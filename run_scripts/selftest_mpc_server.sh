@@ -243,6 +243,18 @@ if [ "$rc" -ne 0 ] && grep -q 'preflight failed' <<<"$out"; then
 else
     no "the preflight gate did not fire (rc=$rc)" "$out"
 fi
+if grep -q 'OVERLAY_RW=1' <<<"$out"; then
+    ok "and it names OVERLAY_RW=1 (this run mounted the overlay read-only)"
+else
+    no "the preflight failure did not mention the read-only overlay" "$out"
+fi
+out="$(PATH="$T/bin:$PATH" PREFLIGHT=1 OVERLAY_RW=1 CONTAINER_CONDA="$T/miniconda_badpython" \
+       bash "$WRAP" umaze all gd_mpc 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && ! grep -q 'OVERLAY_RW=1' <<<"$out"; then
+    ok "no read-only hint when the overlay is mounted read-write"
+else
+    no "the read-only hint appeared for a read-write mount (rc=$rc)" "$out"
+fi
 
 echo
 echo "5. a missing ENV_FILE"

@@ -993,10 +993,15 @@ ls "$HOME/.mujoco/mujoco210/bin"          # libmujoco210.so + libglew{egl,osmesa
 bash run_scripts/setup_mujoco_server.sh
 ```
 
-- The first `import mujoco_py` compiles its `cymj` extension into site-packages *inside
-the overlay*, so that step needs `--overlay "$OVERLAY"` (writable). A running training
-job holds the overlay read-write; run with `--check` (read-only) once cymj exists, or do
-the build in a gap.
+- `import mujoco_py` always needs a **writable** overlay. The first time it compiles
+  `cymj` into site-packages *inside the overlay*, and -- on **every** import, even once
+  `cymj` is built -- it takes a write lock (`fasteners.InterProcessLock`, `builder.py`)
+  at `mujoco_py/generated/mujocopy-buildlock` *before* it checks whether the extension is
+  up to date. A `:ro` mount therefore fails at that import with
+  `OSError: [Errno 30] Read-only file system`, no matter how often cymj has been built.
+  So `--overlay "$OVERLAY"` (no `:ro`) is not a first-run detail: it is required for every
+  planning/MPC run, and two jobs must not hold that overlay at the same time. Verified on
+  torch: slurm-mpc-18333846 failed exactly there with the default `:ro` mount.
 - Exporting `MUJOCO_PY_MUJOCO_PATH` in one interactive shell is not enough: the
   generated `~/mujoco_env.sh` sets it, plus `MUJOCO_GL=egl`, `PYOPENGL_PLATFORM=egl`,
   `D4RL_SUPPRESS_IMPORT_ERROR=1`, `PYTHON=/opt/miniconda/envs/ts/bin/python` and an
@@ -1109,9 +1114,12 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   value to use is `export DATASET_DIR=/scratch/akn7847/datasets/worldmodeldata/point_maze`
   -- the smoke test detects that nesting and prints the exact line to run.
 - Mount flags for a planning job: `--bind "$HOME:$HOME"` (so `~/mujoco_env.sh` is
-  readable) and `--overlay "$OVERLAY:ro"`. Planning only *reads* the overlay, so a
-  read-only mount is safe and avoids fighting a training job that holds it read-write;
-  only the one-time cymj build needs write access.
+  readable) and `--overlay "$OVERLAY"` -- mounted **read-write**. It is tempting to think
+  planning only reads the overlay, but `import mujoco_py` takes a write lock in
+  `mujoco_py/generated/` on every import (11.1), so `:ro` cannot work; with
+  `run_scripts/mpc_server.sh` the knob is `OVERLAY_RW=1` (if the preflight fails while the
+  mount is `:ro`, the wrapper's own error message now says so). Consequence: an MPC run
+  cannot overlap another job holding the same overlay, since ext3 overlays are single-mount.
 - **No data/env exports needed**: the driver sources the shared layout, and
   `run_mpc.sh` derives `DATASET_DIR` per env from `DATA_ROOT` itself (printing
   `data: DATASET_DIR=...` in its header). Override `DATA_ROOT=` on the command line or
@@ -1216,10 +1224,10 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | symptom | cause / fix |
 |---|---|
 | `cannot import torch` after sourcing a MuJoCo env file | MuJoCo libs ahead of conda's in `LD_LIBRARY_PATH` -> `MUJOCO_LD_MODE=append` |
-| cymj build: `Read-only file system` / `Permission denied` | the overlay was mounted `:ro`; the first import needs it writable |
+| `Read-only file system: .../mujoco_py/generated/mujocopy-buildlock` (or any cymj write) | the overlay was mounted `:ro`. mujoco_py takes that write lock on **every** import, built or not, so re-run writable: `OVERLAY_RW=1 sbatch run_scripts/mpc_server.sh` (the smoke test and `setup_mujoco_server.sh --check` mount it read-write too, for the same reason) |
 | cymj build: `gl.h` / `glew` missing | the conda env lost `glew` / `xorg-libx11` / `xorg-xorgproto` (environment.yaml) |
 | `libmujoco210.so: cannot open shared object file` | `MUJOCO_PY_MUJOCO_PATH` wrong, or its `bin` is not on `LD_LIBRARY_PATH` -> `MUJOCO_LD_MODE=prepend` |
-| `Read-only file system: .../mujoco_py/generated/mujocopy-buildlock` | the run used `--check` (`:ro`); the first import must write there -> run without `--check` in a gap between training jobs |
+| two jobs fail on the overlay at once | ext3 overlays are single-mount, and a planning run needs it read-write (row above): it cannot share the overlay with a training job, so serialize those (training keeps the default `:ro`, planning does not) |
 | `undefined symbol: __glewBindBuffer` | informational for the standalone loader test (cymj links glew itself). If the *cymj import* raises it: `LD_PRELOAD=$MUJOCO_PY_MUJOCO_PATH/bin/libglewegl.so` |
 | `gym.error.NameNotFound: Environment point_maze does not exist` | cascade from `import env` failing -- fix the `mujoco_py`/`gym envs` stage above it (usually the same overlay or cymj problem) |
 | `.ts_mpc_body.sh: line N: ENV_FILE: unbound variable` (any `unbound variable`) | the generated body used a value before the preamble exported it (the exports were once appended after the body's `exit "$rc"`). Fixed by writing the preamble first; the wrapper now refuses to start apptainer if that inverts. Verify: `bash run_scripts/selftest_mpc_server.sh` |
