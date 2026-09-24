@@ -23,14 +23,15 @@
 #   (encoder=dino_global, Table 1 rows: UMaze 38.67 / 96.00, Medium 22.67 / 78.00)
 #   and are no longer produced by this script.
 #
-#   PointMaze-Medium is the ONE env whose Table 1 row does not use the learned
-#   aggregation head: the paper (Sec. B.6) uses "[agg] for all environments except
-#   medium maze, [flatten] for medium maze", so this script passes
-#   encoder.agg_type=flatten for point_maze_medium (the 196 patch tokens are pooled by
-#   flattening to 1568 dims instead of the MLP head; the projector is unchanged).
-#   The loss strings keep their agg* prefix (aggcos1e-1 / aggtwothirds5e-2) because they
-#   are applied to the *pooled* features, which for Medium is that flatten -- i.e. the
-#   paper's C_t = cos(vec(v_t), vec(v_t+1)) rule for Medium. Note that lambda stays 1e-1:
+#   PointMaze-Medium now uses the same learned aggregation head as every other env
+#   (the encoder yaml default), so all four of its arms follow the paper's Table 1 row.
+#   Medium's older runs used Sec. B.6's "[flatten] for medium maze" rule instead
+#   (encoder.agg_type=flatten: the 196 patch tokens pooled by flattening to 1568 dims;
+#   the projector is unchanged) -- set AGG_OVERRIDE="encoder.agg_type=flatten" to
+#   reproduce that arm. The loss strings keep their agg* prefix (aggcos1e-1 /
+#   aggtwothirds5e-2) because they are applied to the *pooled* features: now the
+#   learned head for Medium, formerly that flatten (the paper's C_t = cos(vec(v_t),
+#   vec(v_t+1)) rule for Medium). Note that lambda stays 1e-1:
 #   Table 1's caption (paper p.7) states "All spatial features use lambda=0.1"; the
 #   "lambda=0.01 for the rest" sentence in Sec. B.6 belongs to the Fig. 14 aggregation
 #   ablation, not to Table 1.
@@ -64,8 +65,8 @@
 #     of an env get four DISTINCT dirs instead of colliding in checkpoints/<env>_<variant>.
 #     Examples: point_maze both ->
 #       checkpoints/test/umaze_aggmlpcos1e-1_aggmlptwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
-#     point_maze_medium straighten (flatten head) ->
-#       checkpoints/test/medium_aggflattencos1e-1_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+#     point_maze_medium straighten (learned MLP head, the yaml default) ->
+#       checkpoints/test/medium_aggcos1e-1_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
 #     Download them before the session ends (Kaggle /kaggle/working is wiped).
 #   - WANDB_MODE=offline is set; results are stored locally, no API key needed.
 # =============================================================================
@@ -106,8 +107,9 @@ case "$ENV" in
     point_maze_medium)
         ENCODER=dino_channel     # paper Table 1 best row: DINOv2(patch)+proj 14x14x8
         SAVE_NAME=medium         # checkpoint dir prefix (EXPERIMENT.md/run.sh convention)
-        AGG_OVERRIDE="encoder.agg_type=flatten"  # paper Sec. B.6: Medium uses [flatten],
-                                 # i.e. NOT the MLP head that umaze/pusht/wall use
+        AGG_OVERRIDE=""          # keep the learned aggregation head (paper [agg]), same
+                                 # as umaze/pusht/wall. Sec. B.6's [flatten] Medium arm is
+                                 # reproduced by setting encoder.agg_type=flatten here.
         STRAIGHTEN="aggcos1e-1"  # spatial features: lambda=0.1 (Table 1 caption); the
                                  # old cos1e-2 dagger applied to the 1x384 global row
         TWOTHIRDS="aggtwothirds5e-2"
@@ -193,7 +195,8 @@ if [ -n "$REG_WINDOW" ]; then
 fi
 
 # Extra Hydra override selecting the encoder's aggregation rule (empty => keep the config
-# default). Only point_maze_medium sets it (encoder.agg_type=flatten, paper Sec. B.6).
+# default, which is the learned MLP head). No env sets it now; set it to
+# encoder.agg_type=flatten to reproduce the paper's Sec. B.6 [flatten] Medium arm.
 agg_arg=()
 if [ -n "$AGG_OVERRIDE" ]; then
     agg_arg=("$AGG_OVERRIDE")

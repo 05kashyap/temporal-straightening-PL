@@ -615,7 +615,7 @@ The two recipes, both taken from the paper:
 | projector | 14×14 patch grid → 8 channels | whole grid → single **1×384** vector (paper Table 1, L711-713) |
 | aggregation | learnable MLP head (out dim 128), `encoder.agg_type=mlp` | **none** — paper §5 L519-524: for global features (n_v = 1) "compute the cosine similarity directly between vectors" |
 | loss strings | `aggcos1e-1`, `aggtwothirds5e-2` (λ_curv = 0.1) | `cos1e-2`, `ttwothirds5e-2` (λ_curv = 0.01, B.6 L1389-1396) |
-| exception | **medium** flattens instead of the MLP head (`encoder.agg_type=flatten`, paper B.6 / `run.sh`) | — |
+| Medium | now the **same learnable MLP head** as above (the encoder yaml default; new runs are tagged `aggmlp`). The paper's B.6 [flatten] arm is still available from the pre-existing `medium_*aggflatten*` run dirs | — |
 | effective batch | 16 | 32 (paper Table 3 L1192-1203) |
 
 Shared, from paper Table 3 and L695-698: 3 history frames, frameskip 5,
@@ -1125,7 +1125,7 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `data: DATASET_DIR=...` in its header). Override `DATA_ROOT=` on the command line or
   pass `--data-root=DIR` to the driver. `ARM_NAMES` / `--arms-from-ckpt` remains the
   per-cluster input for MPC can be omitted entirely (these checkpoints use `projchannel`/`ttagg…`/
-  `aggflatten` names rather than the built-in dev names).
+  `aggmlp`/`aggflatten` names rather than the built-in dev names).
 - Recovery: if `import mujoco_py` ever regresses, run
   `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` (Cython pin + patch +
   clean rebuild in one command).

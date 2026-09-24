@@ -26,18 +26,19 @@
 #   (Appendix A.3); planning adds objective.alpha=1 per the README and uses
 #   reduced n_evals / num_samples because the 14x14 attention is heavier.
 # ENV=point_maze_medium: PointMaze (D4RL maze2d medium) with the SAME channel projector
-#   as pusht/wall (encoder=dino_channel, 14x14x8) but -- unlike every other env in this
-#   repo -- WITHOUT the learned aggregation head: the paper (Sec. B.6) uses
-#   "[agg] for all environments except medium maze, [flatten] for medium maze", so this
-#   case passes encoder.agg_type=flatten (the 196 patch tokens are pooled by flattening
-#   to 1568 dims). The regularizer strings keep their agg* prefix, which selects
-#   "straighten the POOLED features" -- for Medium those pooled features are that flatten,
-#   i.e. the paper's Medium rule C_t = cos(vec(v_t), vec(v_t+1)) (straighten aggcos1e-1,
-#   twothirds aggtwothirds5e-2); lambda stays 1e-1 because Table 1's caption says "All
-#   spatial features use lambda=0.1" (the 0.01 in Sec. B.6 belongs to the Fig. 14
-#   aggregation ablation). This is the paper's main config (Table 1: 82.67% open-loop /
-#   98.67% MPC with straightening) vs the 1-token global-projector row (22.67% /
-#   78.00%). 20 epochs (maze protocol); batch 16 (the 14x14 attention is heavy).
+#   AND the same learned aggregation head as pusht/wall (encoder=dino_channel, 14x14x8 ->
+#   the MLP head, which is the encoder yaml default), so the regularizer strings select
+#   "straighten the POOLED features" exactly as they do for every other channel env:
+#   straighten aggcos1e-1, twothirds aggtwothirds5e-2; lambda stays 1e-1 because Table 1's
+#   caption says "All spatial features use lambda=0.1" (the 0.01 in Sec. B.6 belongs to
+#   the Fig. 14 aggregation ablation). This is the paper's main config (Table 1: 82.67%
+#   open-loop / 98.67% MPC with straightening) vs the 1-token global-projector row
+#   (22.67% / 78.00%). The paper's Sec. B.6 [flatten] Medium arm -- "[agg] for all
+#   environments except medium maze, [flatten] for medium maze", i.e. C_t =
+#   cos(vec(v_t), vec(v_t+1)) over the 1568-dim flatten -- is reproduced by passing
+#   encoder.agg_type=flatten to the command below; those older runs live under the
+#   medium_*aggflatten* run-dir names and stay on disk as that ablation arm.
+#   20 epochs (maze protocol); batch 16 (the 14x14 attention is heavy).
 # ENV=wall: Wall task, same channel-projector setup (paper App. A.1: 1920 trajs x
 #   50 steps, 20 epochs). Planning follows the paper's Section 5.3: start/goal
 #   states sampled from test trajectories (goal_source='dset') so goals are
@@ -255,26 +256,31 @@ case "$ENV" in
         RUN_BOTH="test/umaze_${STRAIGHTEN}_tt${TWOTHIRDS}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         ;;
     point_maze_medium)
-        # Paper Sec. B.6: Medium is the only env whose Table 1 row pools with [flatten]
-        # instead of the learned aggregation head, hence encoder.agg_type=flatten below.
-        # The regularizer strings keep their agg* prefix because they act on the POOLED
-        # features -- for Medium that pooling is the flatten (the paper's Medium rule is
-        # C_t = cos(vec(v_t), vec(v_t+1)) at lambda=0.1: Table 1's caption "All spatial
-        # features use lambda=0.1"). encoder_lr: 1e-6 for the baseline (no straightening),
-        # 1e-5 for the regularized variants (Table 3 footnote).
-        # The run-dir names follow run.sh's <env>_<straighten>_tt<twothirds>_agg32_...
-        # convention, with the flatten head tagged exactly like conf/train.yaml's
-        # hydra.run.dir template does it (the "agg" in a loss string becomes "aggflatten"),
-        # so a medium run can never be confused with / resume from a head-MLP run. A
-        # baseline name has no loss string to tag (same residual gap as the template), and
-        # this case is the only medium trainer in the repo, so no head-MLP medium run can
-        # appear by accident.
-        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_channel encoder.agg_type=flatten"
+        # Same channel-projector setup as point_maze/pusht/wall: encoder=dino_channel
+        # (14x14x8) with the learned aggregation head, so the regularizers act on the
+        # aggregated features (aggcos1e-1 / aggtwothirds5e-2, lambda=0.1: Table 1's caption
+        # "All spatial features use lambda=0.1"). No agg override is needed -- the encoder
+        # yaml default IS the MLP head, exactly like the other channel envs above.
+        # Medium's older runs pooled with FLATTEN instead (paper B.6 [flatten], C_t =
+        # cos(vec(v_t), vec(v_t+1)), encoder.agg_type=flatten); those dirs stay on disk
+        # under the "aggflatten" tag. The new head-MLP runs are tagged "aggmlp" so the two
+        # recipes can never resume each other's checkpoints. The baseline has no loss
+        # string to tag, hence its explicit aggmlp marker (the same residual gap
+        # conf/train.yaml's hydra.run.dir template has for every baseline).
+        # encoder_lr: 1e-6 for the baseline (no straightening), 1e-5 for the regularized
+        # variants (Table 3 footnote).
+        TRAIN_TASK_OVERRIDES="env=point_maze_medium encoder=dino_channel"
         PLAN_TASK_OVERRIDES=""
-        RUN_FALSE="test/medium_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06"
-        RUN_TRUE="test/medium_${STRAIGHTEN//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
-        RUN_TWOTHIRDS="test/medium_tt${TWOTHIRDS//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
-        RUN_BOTH="test/medium_${STRAIGHTEN//agg/aggflatten}_tt${TWOTHIRDS//agg/aggflatten}_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        # The four names are spelled out rather than built from $STRAIGHTEN / $TWOTHIRDS:
+        # they must match run_scripts/train_server.sh's NAME_* character for character,
+        # since that script is what actually creates/resumes these dirs. Note that
+        # "${TWOTHIRDS//agg/aggmlp}" would render aggmlptwothirds (tag + the whole loss
+        # word), whereas the canonical tag form is aggmlpwothirds -- the same shape the
+        # old flatten set used (medium_ttaggflattenwothirds5e-2).
+        RUN_FALSE="test/medium_False_aggmlp_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06"
+        RUN_TRUE="test/medium_aggmlpcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_TWOTHIRDS="test/medium_ttaggmlpwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
+        RUN_BOTH="test/medium_aggmlpcos1e-1_aggmlpwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05"
         ;;
     pusht)
         TRAIN_TASK_OVERRIDES="env=pusht encoder=dino_channel"

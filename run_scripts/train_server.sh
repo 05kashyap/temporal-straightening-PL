@@ -53,8 +53,10 @@
 #   channel = the paper's MAIN setup: frozen DINOv2 patch features + a trainable
 #             CHANNEL projector -> 14x14x8, curvature on a learnable MLP
 #             AGGREGATION HEAD (out dim 128) -> aggcos1e-1 / aggtwothirds5e-2,
-#             lambda_curv = 0.1. Medium is the one env the paper pools with
-#             FLATTEN instead of the aggregation head (encoder.agg_type=flatten).
+#             lambda_curv = 0.1. All three envs use that head: Medium used to be
+#             pooled with FLATTEN (paper B.6 [flatten], encoder.agg_type=flatten);
+#             those older medium_*aggflatten* runs stay on disk as that ablation
+#             arm, while new Medium runs are tagged aggmlp.
 #   global  = the paper's "DINOv2(patch)+proj 1x384" row: the projector collapses
 #             the patch grid to a single 1x384 vector, and for global features
 #             (n_v = 1) the paper "compute[s] the cosine similarity directly
@@ -341,11 +343,12 @@ esac
 # ─── recipe + run-dir names per (env, dino) ─────────────────────────────────
 # Loss strings are the repo's own: aggcos/aggtwothirds = regularizers on the
 # aggregation head (channel projector), cos/twothirds = directly on the feature
-# vector (global projector; also Medium's flatten pooling). Names follow
-# run.sh / run_mpc.sh so the later planning runs find them; each name's lr
-# suffix must match the lr passed for that arm. "aggflatten" in a Medium name is
-# run.sh's marker for the flatten head (the default head is MLP, so the two can
-# never collide).
+# vector (global projector). Names follow run.sh / run_mpc.sh so the later
+# planning runs find them; each name's lr suffix must match the lr passed for
+# that arm. "aggmlp" in a Medium name tags the learned aggregation head (the
+# yaml default), and "aggflatten" tags the older flatten-pooled runs (paper B.6
+# [flatten], kept as that ablation arm) -- so neither recipe can ever resume the
+# other head's run dir.
 case "$ENV_SEL:$DINO" in
     umaze:channel)
         AGG_OVERRIDE="encoder.agg_type=mlp"
@@ -357,14 +360,19 @@ case "$ENV_SEL:$DINO" in
         NAME_BOTH=umaze_aggcos1e-1_aggtwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
         ;;
     medium:channel)
-        # Paper B.6 / run.sh: Medium is the flatten-pooled env.
-        AGG_OVERRIDE="encoder.agg_type=flatten"
+        # The same learned aggregation head as umaze/pusht (the encoder yaml default):
+        # the 196x8 channel tokens give agg_mlp_in_dim = 196*8 = 1568, exactly as in
+        # umaze. Medium's older runs pooled with FLATTEN instead (paper B.6 [flatten]);
+        # they stay on disk under the aggflatten tag, and the new head-MLP runs are
+        # tagged aggmlp so the two recipes can never resume each other's ckpt. The
+        # baseline has no loss string to tag, hence its explicit aggmlp marker.
+        AGG_OVERRIDE="encoder.agg_type=mlp"
         STRAIGHTEN=aggcos1e-1; TWOTHIRDS=aggtwothirds5e-2; DEF_BATCH=16
         LR_BASE=1e-6; LR_REG=1e-5
-        NAME_BASELINE=medium_False_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06
-        NAME_STRAIGHTEN=medium_aggflattencos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
-        NAME_PREG=medium_ttaggflattenwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
-        NAME_BOTH=medium_aggflattencos1e-1_aggflattenwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+        NAME_BASELINE=medium_False_aggmlp_agg32_projchannel_dim8_hw14_sgTrue_lr1e-06
+        NAME_STRAIGHTEN=medium_aggmlpcos1e-1_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+        NAME_PREG=medium_ttaggmlpwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
+        NAME_BOTH=medium_aggmlpcos1e-1_aggmlpwothirds5e-2_agg32_projchannel_dim8_hw14_sgTrue_lr1e-05
         ;;
     pusht:channel)
         # run.sh trains pusht's baseline at 1e-5 (kept here so an existing
