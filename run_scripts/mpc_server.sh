@@ -51,7 +51,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16   # unchunked planning: one env process per episode (n_evals=50)
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.out
 #SBATCH --error=/scratch/akn7847/datasets/worldmodelcheckpoints/logs/slurm-mpc-%j.err
 set -euo pipefail
