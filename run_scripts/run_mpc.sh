@@ -381,8 +381,16 @@ report_mean_std() {  # $1 planner, $2 model, $3 goal_H, $4... seeds
     # Aggregate the per-seed logs.json files and persist mean +/- std (for every
     # final_eval metric) to plan_outputs_<planner>/summaries/<model>_gH<goal_h>.json.
     # It also prints the legacy console summary line. rc=1 => no seed had results.
-    if ! "$PY" "$PWD/aggregate_mpc_summary.py" "$planner" "$model" "$goal_h" "$@"; then
-        echo "  === $planner / $model: no seed runs with final_eval/success_rate -> no mean/std ==="
+    # The aggregator lives in helpers/ (it moved there with the other analysis helpers); the old
+    # bare-root path made this a SILENT no-op -- the fallback line below then blamed the seeds
+    # ("no seed runs with final_eval") even when they had run fine, and
+    # summaries/<model>_gH<goal_h>.json was never written. It resolves the run dirs relative to
+    # the CWD, so keep this call from the repo root (run_mpc.sh cd's there at the top).
+    local _agg="$PWD/helpers/aggregate_mpc_summary.py"
+    [ -f "$_agg" ] || _agg="$PWD/aggregate_mpc_summary.py"
+    if ! "$PY" "$_agg" "$planner" "$model" "$goal_h" "$@"; then
+        echo "  === $planner / $model: no mean/std (aggregator error above, or no seed had a"
+        echo "      final_eval); per-seed values: plan_outputs_${planner}/${model}_s<seed>_gH${goal_h}/logs.json"
     fi
 }
 
