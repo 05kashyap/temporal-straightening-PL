@@ -97,7 +97,7 @@ def stage_environment():
     """Report (never fail) the variables the rest of the test depends on."""
     keys = ["MUJOCO_PY_MUJOCO_PATH", "MUJOCO_GL", "PYOPENGL_PLATFORM", "EGL_GPU",
             "LD_LIBRARY_PATH", "DISPLAY", "CUDA_VISIBLE_DEVICES", "DATASET_DIR",
-            "MUJOCO_LD_MODE", "PYTHON", "MUJOCO_PY_FORCE_CPU",
+            "MUJOCO_LD_MODE", "PYTHON", "MUJOCO_PY_FORCE_CPU", "TS_ENV_START_METHOD",
             "DATA_ROOT", "CKPT_ROOT"]
     for k in keys:
         print("   %-22s %s" % (k, os.environ.get(k, "<unset>")))
@@ -332,7 +332,15 @@ def stage_planning_inputs():
             else:
                 print("   %-18s MISSING %s" % (env_name, data))
                 missing.append("%s not found -- check DATA_ROOT" % data)
-    ckpt = os.environ.get("CKBPT") or os.environ.get("CKPT_ROOT") or "checkpoints/test"
+    # Resolve the DIRECTORY THAT HOLDS THE RUN DIRS. mpc_server.sh exports CKBPT_PATH (what it
+    # passes to run_mpc.sh as --ckpt, i.e. $CKPT_ROOT/test), so that wins; then CKBPT; then
+    # $CKPT_ROOT/test when it exists. Probing bare $CKPT_ROOT counts test/ and logs/ as "arm
+    # dirs" and reports "0 with model_latest.pth" on a perfectly healthy layout.
+    ckpt = os.environ.get("CKBPT_PATH") or os.environ.get("CKBPT") or ""
+    if not ckpt:
+        _root_ck = os.environ.get("CKPT_ROOT")
+        _test_ck = os.path.join(_root_ck, "test") if _root_ck else ""
+        ckpt = _test_ck if (_test_ck and os.path.isdir(_test_ck)) else (_root_ck or "checkpoints/test")
     if not os.path.isdir(ckpt):
         missing.append("no checkpoint dir at %s (run_mpc.sh needs --ckpt $CKPT_ROOT/test)" % ckpt)
     else:
@@ -342,10 +350,13 @@ def stage_planning_inputs():
                  if os.path.isfile(os.path.join(ckpt, d, "checkpoints", "model_latest.pth"))]
         print("   checkpoints  %s: %d arm dirs, %d with model_latest.pth"
               % (ckpt, len(arms), len(ready)))
-        if not ready:
-            missing.append("no <run dir>/checkpoints/model_latest.pth under %s" % ckpt)
+        if not ready and arms:
+            missing.append("no <run dir>/checkpoints/model_latest.pth under %s (arm dirs: %s)"
+                           % (ckpt, ", ".join(arms[:3]) + (", ..." if len(arms) > 3 else "")))
+        elif not arms:
+            missing.append("no run (arm) dirs under %s" % ckpt)
     for m in missing:
-        print("   sleep 2; cat /tmp/nw11.txt %s" % m)
+        print("   WARN  %s" % m)
     return ("warnings: %d" % len(missing)) if missing else "datasets and checkpoints look right"
 
 

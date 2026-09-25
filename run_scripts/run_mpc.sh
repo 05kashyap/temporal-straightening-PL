@@ -526,9 +526,31 @@ estimate() {  # $1 planner, $2 model, $3 t_setup, $4 smoke_log
 # this exit status) and the summary lists success_rate=<n/a> with no failing env named.
 RC_FAILED=0
 
+# --- failure hints ------------------------------------------------------------
+# A forked env worker that dies while initialising GL prints the OpenGL traceback in the
+# worker and leaves the parent with EOFError from the pipe, so the stage only reports
+# "rc=1" and neither the [estimate] lines nor success_rate say why. Recognise the known
+# messages and name the fix (SERVER_CONTEXT 11.4; run_scripts/gl_backend_probe.py decides
+# whether spawn is the right answer on this machine).
+gl_failure_hint() {  # $1 log file, $2 stage label -- 0 when the log shows a GL init failure
+    grep -qiE 'Failed to initialize OpenGL|OffscreenOpenGLContext|GLEW init' "$1" 2>/dev/null || return 1
+    echo "  !! $2: an env worker could not initialise GL."
+    echo "     The workers are forked, and a child that forks after GL has been initialised"
+    echo "     cannot initialise EGL -- the parent's own renders and the [timing] lines above"
+    echo "     it are fine. Re-run with  TS_ENV_START_METHOD=spawn  (fresh interpreter per"
+    echo "     worker). Confirm the diagnosis first with:"
+    echo "         PROBE=1 OVERLAY_RW=1 FULL=0 sbatch run_scripts/mpc_server.sh"
+    return 0
+}
+
 # --- run ----------------------------------------------------------------------
 echo "=== run_mpc.sh: ckpt=$CKBPT seeds='$SEEDS' env=$ENV_SEL ($ENV_NAME) variants=$VARIANT planners=${PLANNERS[*]} FULL=$FULL OL=$OL ==="
 echo "=== data: DATASET_DIR=$DATASET_DIR  (DATA_ROOT=${DATA_ROOT:-<default>}) ==="
+# Print the two knobs whose absence is invisible in the stage logs: an unset
+# TS_ENV_START_METHOD is exactly what makes a forked env worker fail to initialise OpenGL
+# (SERVER_CONTEXT 11.4), and ARM_NAMES is what decides which four run dirs MODELS points at.
+echo "=== knobs: TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>} MUJOCO_GL=${MUJOCO_GL:-<unset>} ARM_NAMES=${ARM_NAMES:-<auto-discovered>} ==="
+echo "=== arms: ${MODELS[*]} ==="
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "--- DRY_RUN: resolved configuration (nothing is run) ---"
     for _i in "${IDX[@]}"; do
@@ -594,6 +616,8 @@ for model in "${MODELS_SEL[@]}"; do
                 sr=$(get_sr "$rundir/logs.json")
                 if [ -z "$sr" ]; then
                     echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    echo "     (rc=$rc: if the job log shows 'Failed to initialize OpenGL' in an env worker,"
+                    echo "      that is the forked-worker EGL problem -- re-run with TS_ENV_START_METHOD=spawn)"
                     RC_FAILED=1
                     continue
                 fi
@@ -624,6 +648,8 @@ for model in "${MODELS_SEL[@]}"; do
                 sr=$(get_sr "$rundir/logs.json")
                 if [ -z "$sr" ]; then
                     echo "  seed $s rc=$rc (results in $rundir/logs.json); no final_eval/success_rate found"
+                    echo "     (rc=$rc: if the job log shows 'Failed to initialize OpenGL' in an env worker,"
+                    echo "      that is the forked-worker EGL problem -- re-run with TS_ENV_START_METHOD=spawn)"
                     RC_FAILED=1
                     continue
                 fi
@@ -662,6 +688,7 @@ for model in "${MODELS_SEL[@]}"; do
         fi
         if [ $rc1 -ne 0 ]; then
             echo "  !! setup run rc=$rc1 (see $log1); skipping."
+            gl_failure_hint "$log1" "setup" || true
             RC_FAILED=1
             continue
         fi
@@ -690,6 +717,7 @@ for model in "${MODELS_SEL[@]}"; do
         fi
         if [ $rc2 -ne 0 ]; then
             echo "  !! ${planner} smoke rc=$rc2 (see $log2); skipping estimate."
+            gl_failure_hint "$log2" "smoke" || true
             RC_FAILED=1
             continue
         fi
@@ -721,6 +749,7 @@ for model in "${MODELS_SEL[@]}"; do
             fi
             if [ $rc3 -ne 0 ]; then
                 echo "  !! batch sanity rc=$rc3 (see $log3) -- the full run would fail here too."
+                gl_failure_hint "$log3" "batch sanity" || true
                 RC_FAILED=1
                 continue
             fi

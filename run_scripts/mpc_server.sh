@@ -7,6 +7,8 @@
 #   sbatch run_scripts/mpc_server.sh umaze all both        # one job: env variant planner
 #   FULL=0 sbatch run_scripts/mpc_server.sh                # validation: OOM check + runtime estimate
 #   OL=1   sbatch run_scripts/mpc_server.sh                # open loop (one plan per episode)
+#   TS_ENV_START_METHOD=spawn FULL=0 sbatch ...             # spawned env workers (the EGL/fork fix, 11.4)
+#   ARM_NAMES="baseline straighten p_reg both" FULL=0 sbatch ...   # which four run dirs (else auto-discovered)
 #   SEEDS="100" PREFLIGHT=0 OVERLAY_RW=1 sbatch ...        # knobs (see below)
 #   JOBS="umaze:all:gd_mpc medium:both:both" sbatch ...    # explicit grid
 #
@@ -19,6 +21,12 @@
 # straighten=cos without two-thirds, p_reg=two-thirds without cos, both=cos+two-thirds)
 # whenever the built-ins are absent, and aborts with the candidate list if an arm is
 # ambiguous. ARM_NAMES="..." still wins, and is then used for every job in the grid.
+#
+# ARM_NAMES and TS_ENV_START_METHOD are in PREAMBLE_VARS: the container body exports them
+# explicitly (no dependence on apptainer's environment pass-through) and the header prints
+# both, so "was the knob actually set?" is never a question. TS_ENV_START_METHOD=spawn is
+# the EGL+fork fix -- the env workers are forked, and a child that forks after GL has been
+# initialised fails to initialise OpenGL (11.4).
 #
 # Chunking: the evaluation is NOT chunked by default -- CHUNK=null / OL_CHUNK=null /
 # CEM_CHUNK=null put all n_evals (50) episodes in one batch, which also starts one
@@ -89,7 +97,14 @@ ENV_FILE="${ENV_FILE:-$HOME/mujoco_env.sh}"
 # stub got skipped on torch-login-b-2), so an explicit APPTAINER_BIN wins and the header
 # prints what will actually be used.
 APPTAINER_BIN="${APPTAINER_BIN:-$(command -v apptainer 2>/dev/null || true)}"
-BODY="${BODY:-$HOME/.ts_mpc_body.sh}"
+# The generated body is PER JOB (SLURM_JOB_ID when under sbatch, else the shell's PID). It used
+# to be one fixed path -- $HOME/.ts_mpc_body.sh -- which was fine for a single job but is not
+# safe for the intended parallel arm jobs: each job writes its own values (JOBS/ARM_NAMES/
+# SEEDS/CHUNK, ...) into the body's preamble, so two jobs starting together could overwrite the
+# file while the other bash was still reading it -- one job would silently run the other's
+# configuration, or die on a partly written file. The per-job file is kept after the run for
+# post-mortem; `rm -f ~/.ts_mpc_body.*.sh` cleans them up.
+BODY="${BODY:-$HOME/.ts_mpc_body.${SLURM_JOB_ID:-$$}.sh}"
 # shared data/checkpoint layout, same file train_server.sh uses
 source "$REPO_HOST/run_scripts/dataset_paths.sh"
 
@@ -101,6 +116,11 @@ PROBE="${PROBE:-0}"              # 1 = run run_scripts/gl_backend_probe.py first
 CHUNK="${CHUNK:-null}"            # closed-loop plan/eval chunking (null = one batch for all n_evals)
 OL_CHUNK="${OL_CHUNK:-null}"      # open-loop ditto
 CEM_CHUNK="${CEM_CHUNK:-null}"    # CEM sample_chunk_size (null = all candidates at once)
+# Both are handed straight to run_mpc.sh / plan.py. They are in PREAMBLE_VARS, so the
+# container body exports (and the header prints) exactly the value the stages will see,
+# instead of relying on apptainer's host-environment pass-through.
+ARM_NAMES="${ARM_NAMES:-}"                       # 4 run-dir names: baseline straighten p_reg both
+TS_ENV_START_METHOD="${TS_ENV_START_METHOD:-}"   # spawn = fresh interpreter per env worker (EGL/fork fix)
 
 # Unchunked planning starts one env process per episode; say so rather than silently
 # chunking (or silently oversubscribing the allocation).
@@ -112,6 +132,31 @@ fi
 unset _cpus
 CKBPT_PATH="${CKBPT:-$CKPT_ROOT/test}"
 MOUNT="$OVERLAY:ro"; [ "${OVERLAY_RW:-0}" = "1" ] && MOUNT="$OVERLAY"
+
+# --- binds ---------------------------------------------------------------------------
+# $HOME is always bound (the env file and the checkout live there). EXTRA_BIND adds one more
+# host:container pair. LOCK_BIND=1 moves mujoco_py's build lock out of the overlay: planning
+# needs the overlay writable only because mujoco_py takes a write lock at
+#   <ts env>/lib/python3.9/site-packages/mujoco_py/generated/mujocopy-buildlock
+# on every import (SERVER_CONTEXT 11.1). A read-write ext3 overlay is single-mount, which is
+# why a second planning job cannot start while one is running; bound to a file in $HOME, the
+# overlay needs no writes, so it can stay ':ro' (the default) and any number of jobs -- e.g.
+# the closed-loop and the open-loop run -- can share it concurrently.
+CONTAINER_ENV_PREFIX="${CONTAINER_ENV_PREFIX:-/opt/conda-envs/ts}"
+CONTAINER_LOCK="${CONTAINER_LOCK:-$CONTAINER_ENV_PREFIX/lib/python3.9/site-packages/mujoco_py/generated/mujocopy-buildlock}"
+BIND_ARGS=(--bind "$HOME:$HOME")
+if [ -n "${EXTRA_BIND:-}" ]; then BIND_ARGS+=(--bind "$EXTRA_BIND"); fi
+if [ "${LOCK_BIND:-0}" = "1" ]; then
+    LOCK_FILE="$HOME/.mujoco/mujocopy-buildlock"
+    mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
+    [ -f "$LOCK_FILE" ] || : > "$LOCK_FILE" 2>/dev/null || true
+    if [ -f "$LOCK_FILE" ]; then
+        BIND_ARGS+=(--bind "$LOCK_FILE:$CONTAINER_LOCK")
+    else
+        echo "FATAL: LOCK_BIND=1 but $LOCK_FILE cannot be created" >&2
+        exit 1
+    fi
+fi
 # The body reports a read-only mount when the preflight fails: that alone is fatal for
 # `import mujoco_py` (see the note above), so it is passed along with the values.
 OVERLAY_RO=0; case "$MOUNT" in *:ro) OVERLAY_RO=1 ;; esac
@@ -133,6 +178,7 @@ echo "repo    : $REPO_HOST"
 echo "cpus    : ${SLURM_CPUS_PER_TASK:-<not under slurm>} requested (nproc=$(nproc 2>/dev/null || echo ?))"
 echo "body    : $BODY  (in container: repo=$REPO_IN_CONTAINER, conda=$CONTAINER_CONDA:$CONDA_ENV, env file=$ENV_FILE)"
 echo "tool    : apptainer=${APPTAINER_BIN:-NOT FOUND (PATH and APPTAINER_BIN are empty)}"
+echo "binds   : ${BIND_ARGS[*]}   (LOCK_BIND=${LOCK_BIND:-0}, EXTRA_BIND=${EXTRA_BIND:-<none>})"
 echo "probe   : PROBE=$PROBE   (1 = run the fork/spawn EGL probe before the preflight)"
 echo "jobs    : $JOBS"
 echo "mode    : FULL=$FULL OL=$OL seeds='$SEEDS' preflight=$PREFLIGHT sanity=${SANITY:-1} overlay=$MOUNT"
@@ -173,7 +219,8 @@ esac
 # never executed at all. PREAMBLE_VARS is the single source of truth here: it drives both
 # the export block and the ordering check further down, so the two cannot drift apart.
 PREAMBLE_VARS=(REPO_IN_CONTAINER CONTAINER_CONDA CONDA_ENV FULL OL SEEDS PREFLIGHT JOBS
-               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO PROBE)
+               CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO PROBE
+               ARM_NAMES TS_ENV_START_METHOD)
 OL_SUFFIX=""
 if [ "$OL" = "1" ]; then OL_SUFFIX=".ol"; fi
 
@@ -197,6 +244,7 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 log_dir="$CKPT_ROOT/logs"
 mkdir -p "$log_dir"
 echo "[container] python=$(command -v python)  DATA_ROOT=$DATA_ROOT  log_dir=$log_dir"
+echo "[container] knobs  : TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>}  ARM_NAMES=${ARM_NAMES:-<auto-discovered>}"
 
 if [ "$PROBE" = "1" ]; then
     echo "---- GL probe: does a forked env worker initialise EGL here? ----"
@@ -224,7 +272,10 @@ for job in $JOBS; do
     variant="${rest%%:*}"; planner="${rest#*:}"
     log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
     echo
-    echo "---- $(date '+%F %H:%M:%S') $env_sel / $variant / $planner -> $log ----"
+    # This banner is tee'd into $log on purpose: the log is append-only across jobs, so the
+    # summary below needs a marker to tell THIS job's output from an earlier run's (it used
+    # to grep the whole file and therefore report the previous run's numbers).
+    echo "---- $(date '+%F %H:%M:%S') $env_sel / $variant / $planner -> $log ----" | tee -a "$log"
     if bash run_scripts/run_mpc.sh "$env_sel" "$variant" "$planner" --ckpt "$CKBPT_PATH" 2>&1 | tee -a "$log"; then
         echo "  [ok]   $env_sel $variant $planner"
     else
@@ -240,15 +291,32 @@ for job in $JOBS; do
     env_sel="${job%%:*}"; rest="${job#*:}"
     variant="${rest%%:*}"; planner="${rest#*:}"
     log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
-    sr=$(grep -oE 'success_rate[ =:]+[0-9.]+' "$log" 2>/dev/null | tail -1 | grep -oE '[0-9.]+' || true)
+    # $log is append-only across jobs, so every read is scoped to THIS job's section: the
+    # banner above the run_mpc.sh call marks where it starts. Reading the whole file (the old
+    # `tail -1` on success_rate, or the first four [estimate] lines anywhere in it) reported an
+    # *earlier* run's numbers -- e.g. a success_rate for a run that never got past [1/4].
+    _from=$(grep -nE '^---- [0-9]{4}-[0-9]{2}-[0-9]{2} .* -> ' "$log" 2>/dev/null | tail -1 | cut -d: -f1 || true)
+    _sec() { if [ -n "$_from" ]; then tail -n "+$_from" "$log"; else cat "$log"; fi; }
+    sr=$(_sec | grep -oE 'success_rate[ =:]+[0-9.]+' | tail -1 | grep -oE '[0-9.]+' || true)
     printf '  %-28s %-9s %-8s success_rate=%s\n' "$env_sel" "$variant" "$planner" "${sr:-<n/a>}"
+    # Name the failing stages of this run: success_rate=<n/a> alone does not say where it died,
+    # and run_mpc.sh's own "!!" lines are the only place that knows. sed, not head: under
+    # pipefail an early exit would SIGPIPE the upstream grep.
+    _nbad=$(_sec | grep -c '^  !!' || true)
+    if [ "${_nbad:-0}" -gt 0 ]; then _sec | grep '^  !!' | sed -n '1,4p' | sed 's/^/      /'; fi
     if [ "$FULL" = "0" ]; then
         # A FULL=0 run has no success_rate by design: its [estimate] lines are the result,
         # and they are what decides whether the full run fits the allocation.
-        grep -m4 '\[estimate\]' "$log" 2>/dev/null | sed 's/^/      /' || true
+        _nest=$(_sec | grep -c '\[estimate\]' || true)
+        if [ "${_nest:-0}" -gt 0 ]; then
+            _sec | grep '\[estimate\]' | sed -n '1,4p' | sed 's/^/      /'
+        else
+            echo "      no [estimate] lines in this job's section -- it did not reach [3/4]"
+        fi
     fi
     echo "      log: $log"
 done
+unset _from _nbad _nest
 [ -n "$fail" ] && echo "failed:$fail"
 echo "summaries: $REPO_IN_CONTAINER/plan_outputs_*/summaries/"
 exit "$rc"
@@ -284,7 +352,7 @@ unset _bad
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "--dry-run: 'bash -n' and the preamble-order check passed."
-    echo "--dry-run: apptainer exec --fakeroot --nv --bind \$HOME:\$HOME --overlay $MOUNT $SIF bash -lc 'bash $BODY'"
+    echo "--dry-run: apptainer exec --fakeroot --nv ${BIND_ARGS[*]} --overlay $MOUNT $SIF bash -lc 'bash $BODY'"
     echo "---- generated body ----"
     sed -n '1,200p' "$BODY"
     exit 0
@@ -303,5 +371,5 @@ if [ -z "$APPTAINER_BIN" ]; then
     exit 1
 fi
 
-"$APPTAINER_BIN" exec --fakeroot --nv --bind "$HOME:$HOME" --overlay "$MOUNT" "$SIF" \
+"$APPTAINER_BIN" exec --fakeroot --nv "${BIND_ARGS[@]}" --overlay "$MOUNT" "$SIF" \
     bash -lc "bash $BODY"

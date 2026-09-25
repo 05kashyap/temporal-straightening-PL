@@ -1125,7 +1125,19 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `data: DATASET_DIR=...` in its header). Override `DATA_ROOT=` on the command line or
   pass `--data-root=DIR` to the driver. `ARM_NAMES` / `--arms-from-ckpt` remains the
   per-cluster input for MPC can be omitted entirely (these checkpoints use `projchannel`/`ttagg…`/
-  `aggmlp`/`aggflatten` names rather than the built-in dev names).
+  `aggmlp`/`aggflatten` names rather than the built-in dev names). `ARM_NAMES` and
+  `TS_ENV_START_METHOD` are forwarded to the container explicitly (`mpc_server.sh`'s
+  `PREAMBLE_VARS`) and echoed by `run_mpc.sh`'s `knobs:` / `arms:` header lines, so a run's own
+  log always states which four arms and which start method it used.
+- **Parallel arm jobs are safe, with rules**: every per-arm artifact is namespaced (per-variant
+  log `mpc_<env>_<variant>_<planner>.log`, run dirs / validate logs / `summaries/` carry the model
+  name) and the generated container body is per job (`~/.ts_mpc_body.<jobid>.sh`), so one job per
+  *arm* can run at once — submit with `LOCK_BIND=1` (the overlay can then stay `:ro`, which is
+  what makes sharing possible) and `CHUNK=16`. Never run the same arm in two jobs: the validate
+  stage writes fixed per-arm paths with `>` (so two jobs clobber each other's setup/smoke/sanity
+  logs, which the OOM/GL checks read), the per-variant log is `tee -a` (interleaved lines, and the
+  banner-scoped summary may then read the sibling's section), and the FULL/OL seed loops
+  `rm -rf "$rundir"` — a resubmitted job re-runs (and deletes) seeds it had already finished.
 - Recovery: if `import mujoco_py` ever regresses, run
   `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` (Cython pin + patch +
   clean rebuild in one command).
@@ -1258,10 +1270,10 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
 | the wrapper ran an apptainer you did not expect | `tool : apptainer=...` in the job header says which one it used; set `APPTAINER_BIN=/path/to/apptainer` to pin it |
 | `FATAL: apptainer is not on PATH here` | the wrapper needs the same apptainer you use interactively: load the module/alias, or check the wrapper logic with `run_scripts/selftest_mpc_server.sh` |
 | `python: command not found` inside the container (as the LIVE check first reported) | the container's conda env was not activated: the bare image has no `python`. Run `LIVE=1 bash run_scripts/selftest_mpc_server.sh` (it activates `CONTAINER_CONDA`:`CONDA_ENV`, default `/opt/miniconda`:ts, and prints the path it found); a wrong prefix is now a labelled `FATAL: .../etc/profile.d/conda.sh is not visible` / `no python on PATH after activating ...` instead of a cascade |
-| `plan_outputs_gd_mpc/validate_<model>_setup.log: No such file or directory`, then every env "skipped", `success_rate=<n/a>`, and a `failed:` list naming only one env | the validate redirects opened their log before anything created that directory, and every failure ended in `continue` so the exit status was incidental. Fixed: `run_mpc.sh` creates the directory first and exits non-zero when a run produced no result (so `mpc_server.sh` prints `[FAIL]`) |
+| `plan_outputs_gd_mpc/validate_<model>_setup.log: No such file or directory`, then every env "skipped", `success_rate=<n/a>`, and a `failed:` list naming only one env | the validate redirects opened their log before anything created that directory, and every failure ended in `continue` so the exit status was incidental. Fixed: `run_mpc.sh` creates the directory first and exits non-zero when a run produced no result (so `mpc_server.sh` prints `[FAIL]`). The wrapper's summary also reads only the *current* job's section of the append-only log (banner-delimited), so it can no longer report an earlier run's `success_rate`/`[estimate]` lines, and it echoes the run's own `!!` lines to name the failing stage |
 | `can't open file 'plan.py'`, or `plan_outputs_*` appearing under `run_scripts/` | the driver was running from `run_scripts/` instead of the repo root (`cd "$(dirname "$0")"` with no way back). Fixed in `run_mpc.sh` / `run.sh` / `run_wall_ablation.sh` |
 | `IndexError: index 10 is out of bounds for axis 0 with size 10` in `planning/evaluator.py`'s `_mask_traj` (the eval itself printed a `Success rate`) | the visualization mixed two batch sizes: `i_z_obses_first` is the whole **first chunk** (`chunk_size` rows) while the mask came from `action_len[:n_plot_samples]` (10). Any `chunk_size > n_plot_samples` crashed -- and `chunk_size < 10` broke the plotter's video loop, which iterates `e_visuals` while indexing `i_visuals`. Fixed by decoding/plotting `min(n_plot_samples, chunk)` and masking each array by its own batch size; metrics were never affected. `SANITY=1 FULL=0` (default) now exercises exactly this, see 11.3 |
-| `RuntimeError: Failed to initialize OpenGL` in an `env/venv.py` worker (the smoke test's own render passes, `[timing] setup_model_s=` is already printed) | the env workers are **forked**, and a child that forks after GL has been initialised can fail (EGL) or hang (X11/GLFW) while the parent renders fine. Confirm with `PROBE=1 OVERLAY_RW=1 FULL=0 sbatch run_scripts/mpc_server.sh`, then re-run with `TS_ENV_START_METHOD=spawn` |
+| `RuntimeError: Failed to initialize OpenGL` in an `env/venv.py` worker (the smoke test's own render passes, `[timing] setup_model_s=` is already printed) | the env workers are **forked**, and a child that forks after GL has been initialised can fail (EGL) or hang (X11/GLFW) while the parent renders fine. Confirm with `PROBE=1 OVERLAY_RW=1 FULL=0 sbatch run_scripts/mpc_server.sh`, then re-run with `TS_ENV_START_METHOD=spawn` -- `mpc_server.sh` forwards it explicitly (`PREAMBLE_VARS`) and prints it in the job header, `run_mpc.sh`'s `[1/4] setup` failure now names this cause instead of only `rc=1`, and `mujoco_smoke.py` lists the variable in its env report |
 | ... and if the probe fails for **both** fork and spawn | the EGL stack itself is unusable here: fall back to the CPU/OSMesa backend (`MUJOCO_PY_FORCE_CPU=1 MUJOCO_GL=osmesa`, cymj rebuilt -- see 11.1) and send the probe output to whoever set the container up |
 | `FATAL: the checkout is at ... (outside $HOME), but only $HOME is bound` | the repo lives outside `$HOME`, the only path mounted into the image. Submit from a checkout under `$HOME`, or set `REPO_IN_CONTAINER` + add your own `--bind`, then `ALLOW_OUTSIDE_HOME=1` |
 | `FATAL: ENV_FILE=... is not readable here` | `~/mujoco_env.sh` is not on this machine: run `run_scripts/setup_mujoco_server.sh` (11.1), or point `ENV_FILE` at your own copy |
