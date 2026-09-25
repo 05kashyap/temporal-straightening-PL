@@ -1128,7 +1128,12 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   `aggmlp`/`aggflatten` names rather than the built-in dev names). `ARM_NAMES` and
   `TS_ENV_START_METHOD` are forwarded to the container explicitly (`mpc_server.sh`'s
   `PREAMBLE_VARS`) and echoed by `run_mpc.sh`'s `knobs:` / `arms:` header lines, so a run's own
-  log always states which four arms and which start method it used.
+  log always states which four arms and which start method it used. `ARM_NAMES` is
+  **index-aligned** (`baseline straighten p_reg both`): a swapped p_reg/both pair runs the wrong
+  arm with no other symptom (e.g. `variant=twothirds` measuring "both", so p_reg is never
+  measured), so `run_mpc.sh` prints an `[i] variant exists? tokens name` table and warns when a
+  name's tokens (`cos` / `twothirds`, the rules the auto-discovery uses) disagree with its slot.
+  Commas are tolerated in the list (it is word-split, so they used to become part of the name).
 - **Parallel arm jobs are safe, with rules**: every per-arm artifact is namespaced (per-variant
   log `mpc_<env>_<variant>_<planner>.log`, run dirs / validate logs / `summaries/` carry the model
   name) and the generated container body is per job (`~/.ts_mpc_body.<jobid>.sh`), so one job per

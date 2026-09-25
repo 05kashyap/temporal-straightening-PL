@@ -272,6 +272,11 @@ esac
 # variants all|False|straighten|twothirds|both:
 #   ARM_NAMES="baseline straighten p_reg both" bash run_mpc.sh <env> all both ...
 if [ -n "${ARM_NAMES:-}" ]; then
+    # The list is WORD-SPLIT, so commas are not separators: "a, b, c, d" parses as the names
+    # "a," "b," "c," -- the count check still passes and the failure only shows up much later as
+    # "model not available"/"have no run dir". A comma list is the natural thing to type, so
+    # accept it instead of failing on it.
+    ARM_NAMES="${ARM_NAMES//,/ }"
     read -r -a _arm_names <<< "$ARM_NAMES"
     if [ "${#_arm_names[@]}" -ne 4 ]; then
         echo "ARM_NAMES needs 4 space-separated run-dir names (baseline straighten p_reg both), got ${#_arm_names[@]}" >&2
@@ -436,6 +441,7 @@ if [ "$DIRECT_CKBPT" != "1" ]; then
             exit 1
         fi
         MODELS=("$_base" "$_str" "$_preg" "$_both")
+        _arms_discovered=1
         echo "=== arms for $ENV_SEL (discovered under $CKBPT):"
         echo "      baseline=$_base"
         echo "      straighten=$_str"
@@ -550,7 +556,39 @@ echo "=== data: DATASET_DIR=$DATASET_DIR  (DATA_ROOT=${DATA_ROOT:-<default>}) ==
 # TS_ENV_START_METHOD is exactly what makes a forked env worker fail to initialise OpenGL
 # (SERVER_CONTEXT 11.4), and ARM_NAMES is what decides which four run dirs MODELS points at.
 echo "=== knobs: TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>} MUJOCO_GL=${MUJOCO_GL:-<unset>} ARM_NAMES=${ARM_NAMES:-<auto-discovered>} ==="
-echo "=== arms: ${MODELS[*]} ==="
+# Index -> variant -> run dir, with the regularizer tokens the name carries. The four names are
+# INDEX-ALIGNED with the variants (baseline straighten p_reg both) and nothing in a name enforces
+# that, so a swapped pair runs the wrong arm with no error at all: `variant=twothirds` would
+# measure "both" and p_reg would never be measured. The tokens here are the same ones the
+# auto-discovery uses, so a mismatch is called out now rather than in a mislabelled table later.
+if [ -n "${_arms_explicit:-}${_arms_discovered:-}" ] && [ "$DIRECT_CKBPT" != "1" ]; then
+    _ck_root="$CKBPT"; case "$_ck_root" in /*) ;; *) _ck_root="$PWD/$_ck_root" ;; esac
+    _lab=(False straighten twothirds both)
+    _want=(none cos twothirds cos+twothirds)
+    _arm_bad=""
+    echo "=== arms (index -> variant -> run dir; the name's tokens must match the variant):"
+    for _i in 0 1 2 3; do
+        _n="${MODELS[$_i]}"
+        _cos=0; _tt=0
+        case "$_n" in *cos*) _cos=1 ;; esac
+        case "$_n" in *wothirds*|*twothirds*) _tt=1 ;; esac
+        _tok="none"
+        if [ "$_cos" = "1" ] && [ "$_tt" = "1" ]; then _tok="cos+twothirds"
+        elif [ "$_cos" = "1" ]; then _tok="cos"
+        elif [ "$_tt" = "1" ]; then _tok="twothirds"
+        fi
+        _where="ok"; [ -d "$_ck_root/$_n" ] || _where="NO-DIR"
+        printf '      [%d] %-10s %-8s %-7s %s\n' "$_i" "${_lab[$_i]}" "$_where" "$_tok" "$_n"
+        [ "$_tok" = "${_want[$_i]}" ] || _arm_bad="$_arm_bad [$_i]=${_lab[$_i]}(has $_tok)"
+    done
+    if [ -n "$_arm_bad" ]; then
+        echo "!! ARM_NAMES is index-aligned (baseline straighten p_reg both) but these slots do not" >&2
+        echo "   match the variant they will be used for:$_arm_bad" >&2
+        echo "   A swap runs the wrong arm with no other symptom -- e.g. variant=twothirds measuring" >&2
+        echo "   'both', so p_reg is never measured. Reorder the names to match the tokens above." >&2
+    fi
+    unset _ck_root _lab _want _arm_bad _i _n _cos _tt _tok _where
+fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "--- DRY_RUN: resolved configuration (nothing is run) ---"
     for _i in "${IDX[@]}"; do
