@@ -53,9 +53,12 @@ planner:
     # (A value of 5 here would collapse to a greedy 1-model-step lookahead.)
     horizon: 25
     topk: 30
-    num_samples: 300
+    # The paper's CEM budget -- conf/plan_cem.yaml (open-loop CEM): 200 samples,
+    # 10 opt steps, horizon 25, topk 30. The 300/30 in conf/planner/mpc_cem.yaml is
+    # a DINO-WM component leftover (horizon 5) that no paper row uses.
+    num_samples: 200
     sample_chunk_size: null  # if set (e.g. 50), roll out num_samples candidates in chunks of this size to bound GPU memory; result identical to one full rollout
     var_scale: 1
-    opt_steps: 30
+    opt_steps: 10
     eval_every: 1
   name: mpc_cem

@@ -7,8 +7,8 @@
 #
 # Faithful MPC = the paper's closed-loop MPC (temporal-straightening, Table 4/5):
 #   n_taken_actions=5, GD opt_steps=100 (Adam, lr 0.1, zero init); CEM
-#   num_samples=300, opt_steps=30 (plan_mpc_cem.yaml defaults; the paper's CEM
-#   is open-loop only). max_iter is capped at 20 -- the MPC loop exits early
+#   num_samples=200, opt_steps=10 (the paper's CEM budget, conf/plan_cem.yaml; the
+#   paper's CEM is open-loop only). max_iter is capped at 20 -- the MPC loop exits early
 #   on success, so the cap is only a safety bound.
 #
 # Open loop (OL=1) = the paper's open-loop planning row: conf/plan_gd.yaml /
@@ -43,7 +43,7 @@
 #   (GD) or plan_outputs_cem_ol/... (CEM), then aggregate with
 #   aggregate_mpc_summary.py gd_ol|cem_ol <model> <goal_H> <seeds...>.
 #   Budgets default to the same sub-planner budget as the closed-loop runs
-#   (GD opt_steps=100; CEM num_samples=300, opt_steps=30) so the OPEN vs CLOSED
+#   (GD opt_steps=100; CEM num_samples=200, opt_steps=10) so the OPEN vs CLOSED
 #   gap is purely "feedback vs no feedback"; override with OL_GD_OPT /
 #   OL_CEM_SAMPLES / OL_CEM_OPT / OL_CEM_CHUNK / OL_N_EVALS / OL_CHUNK.
 #
@@ -322,8 +322,8 @@ esac
 FULL_N_EVALS="${FULL_N_EVALS:-50}"
 FULL_MAX_ITER="${FULL_MAX_ITER:-20}"
 GD_OPT="${GD_OPT:-100}"              # paper Table 4
-CEM_SAMPLES="${CEM_SAMPLES:-200}"   # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
-CEM_OPT="${CEM_OPT:-10}"            # plan_mpc_cem.yaml default
+CEM_SAMPLES="${CEM_SAMPLES:-200}"   # estimate input: the paper's CEM budget (200 / 10 below)
+CEM_OPT="${CEM_OPT:-10}"            # estimate input: plan_mpc_cem.yaml now matches it
 CEM_CHUNK="${CEM_CHUNK:-50}"   # CEM sample_chunk_size; "null" rolls every candidate at once
 
 S_N_EVALS=1
@@ -351,8 +351,8 @@ SANITY="${SANITY:-1}"
 OL_N_EVALS="${OL_N_EVALS:-50}"
 OL_CHUNK="${OL_CHUNK:-1}"                 # episodes per plan() call (1 = one episode per plan)
 OL_GD_OPT="${OL_GD_OPT:-$GD_OPT}"
-OL_CEM_SAMPLES="${OL_CEM_SAMPLES:-300}"   # plan_mpc_cem.yaml default
-OL_CEM_OPT="${OL_CEM_OPT:-30}"            # plan_mpc_cem.yaml default
+OL_CEM_SAMPLES="${OL_CEM_SAMPLES:-200}"   # the paper's CEM budget (conf/plan_cem.yaml)
+OL_CEM_OPT="${OL_CEM_OPT:-10}"            # ditto: 200 samples / 10 opt steps
 OL_CEM_CHUNK="${OL_CEM_CHUNK:-$CEM_CHUNK}"
 
 # 5 env actions per MPC iteration for these fs=5 envs (n_taken_actions=5 -> /frameskip)

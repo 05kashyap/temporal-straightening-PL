@@ -272,7 +272,7 @@ echo "[container] knobs  : TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>}  
 # Budgets as run_mpc.sh will read them, defaults included: an OL/CL comparison cannot then
 # silently run different CEM budgets (the run dir name carries ns/opt as well).
 echo "[container] budgets: FULL_N_EVALS=${FULL_N_EVALS:-50(def)} FULL_MAX_ITER=${FULL_MAX_ITER:-20(def)} GD_OPT=${GD_OPT:-100(def)} CEM_SAMPLES=${CEM_SAMPLES:-200(def)} CEM_OPT=${CEM_OPT:-10(def)}"
-echo "[container] budgets: OL_N_EVALS=${OL_N_EVALS:-<FULL>} OL_GD_OPT=${OL_GD_OPT:-100(def)} OL_CEM_SAMPLES=${OL_CEM_SAMPLES:-300(def)} OL_CEM_OPT=${OL_CEM_OPT:-30(def)}"
+echo "[container] budgets: OL_N_EVALS=${OL_N_EVALS:-<FULL>} OL_GD_OPT=${OL_GD_OPT:-100(def)} OL_CEM_SAMPLES=${OL_CEM_SAMPLES:-200(def)} OL_CEM_OPT=${OL_CEM_OPT:-10(def)}"
 
 if [ "$PROBE" = "1" ]; then
     echo "---- GL probe: does a forked env worker initialise EGL here? ----"
