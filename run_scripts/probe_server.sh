@@ -75,7 +75,11 @@ SEED="${SEED:-0}"
 TEST_FRAC="${TEST_FRAC:-0.3}"
 
 source "$REPO_HOST/run_scripts/dataset_paths.sh"
-OUTDIR="${OUTDIR:-$REPO_IN_CONTAINER/analysis_outputs}"
+# Where the figures/CSVs/markdown land. The default is SCRATCH, not the repo: the checkout
+# lives in $HOME, which is small on this cluster (and shared with everyone's dotfiles), and
+# a 48 h probe job should never be pointed at it. OUTDIR=/somewhere still wins.
+OUTDIR="${OUTDIR:-${ART_ROOT:-$SCRATCH/datasets/worldmodelart}/probes}"
+mkdir -p "$OUTDIR" 2>/dev/null || true
 MOUNT="$OVERLAY:ro"; [ "${OVERLAY_RW:-0}" = "1" ] && MOUNT="$OVERLAY"
 BIND_ARGS=(--bind "$HOME:$HOME")
 [ -n "${EXTRA_BIND:-}" ] && BIND_ARGS+=(--bind "$EXTRA_BIND")
