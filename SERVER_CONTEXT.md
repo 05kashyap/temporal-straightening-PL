@@ -1143,6 +1143,18 @@ OL=1   bash run_scripts/run_mpc.sh umaze all   both   --ckpt "$CKPT_ROOT/test"  
   logs, which the OOM/GL checks read), the per-variant log is `tee -a` (interleaved lines, and the
   banner-scoped summary may then read the sibling's section), and the FULL/OL seed loops
   `rm -rf "$rundir"` — a resubmitted job re-runs (and deletes) seeds it had already finished.
+- **Linear probes** (`analysis/run_probes.py` + `run_scripts/probe_server.sh`): the *grounded*
+  probe (real val frames) and the *ungrounded rollout* probe (the model's own imagined latents)
+  are run for every (env, recipe) group under `$CKPT_ROOT/test`. The recipe is read from each run
+  dir's own `hydra.yaml` (`encoder.projector` + `encoder.agg_type` -> global / flatten / aggmlp)
+  and the arm from the name tokens, so the global / flatten / aggmlp checkpoints of one env no
+  longer overwrite each other's figure -- outputs are `rollout_probe_<env>_<recipe>.png`,
+  `linear_probe_<env>_<recipe>.png` and matching per-group CSVs. The sbatch wrapper needs only
+  1 GPU and can keep the overlay `:ro` (the probes never import mujoco_py, so no build lock).
+  `analysis/probe_report.py` turns the CSVs into `analysis_outputs/probe_report.md` plus one
+  `<figure>.md` beside every PNG: the per-figure explanation, checkpoint table, numbers,
+  hyperparameters and the command that regenerates it all live there, because the figures carry a
+  single short title (the old sentence-length caption overflowed the axes box).
 - Recovery: if `import mujoco_py` ever regresses, run
   `bash run_scripts/setup_mujoco_server.sh --fix-mujoco-py` (Cython pin + patch +
   clean rebuild in one command).
