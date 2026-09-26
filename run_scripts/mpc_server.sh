@@ -11,6 +11,7 @@
 #   ARM_NAMES="baseline straighten p_reg both" FULL=0 sbatch ...   # which four run dirs (else auto-discovered)
 #   SEEDS="100" PREFLIGHT=0 OVERLAY_RW=1 sbatch ...        # knobs (see below)
 #   JOBS="umaze:all:gd_mpc medium:both:both" sbatch ...    # explicit grid
+#   LOG_TAG=flatten ARM_NAMES="..." sbatch ...             # parallel recipe jobs (see below)
 #
 # Inside one allocation the jobs run SEQUENTIALLY -- planning wants the whole GPU --
 # each into $CKPT_ROOT/logs/mpc_<env>_<variant>_<planner>.log, then a pass/fail summary.
@@ -27,6 +28,13 @@
 # both, so "was the knob actually set?" is never a question. TS_ENV_START_METHOD=spawn is
 # the EGL+fork fix -- the env workers are forked, and a child that forks after GL has been
 # initialised fails to initialise OpenGL (11.4).
+#
+# Sibling jobs and the log file: the log name is mpc_<env>_<variant>_<planner>[.ol].log, so
+# two recipes of one env (medium flatten vs medium aggmlp) submitted in parallel append to
+# the SAME file. The summary is scoped by the last banner in that file, so with two writers
+# it can attribute the other job's !! / [estimate] lines to this one. LOG_TAG=<recipe> puts
+# the recipe in the file name instead: LOG_TAG=aggmlp -> mpc_medium_all_mpc_cem.aggmlp.log.
+# (Unset = the old name, so nothing changes for single-recipe runs.)
 #
 # Chunking: the evaluation is NOT chunked by default -- CHUNK=null / OL_CHUNK=null /
 # CEM_CHUNK=null put all n_evals (50) episodes in one batch, which also starts one
@@ -121,6 +129,20 @@ CEM_CHUNK="${CEM_CHUNK:-null}"    # CEM sample_chunk_size (null = all candidates
 # instead of relying on apptainer's host-environment pass-through.
 ARM_NAMES="${ARM_NAMES:-}"                       # 4 run-dir names: baseline straighten p_reg both
 TS_ENV_START_METHOD="${TS_ENV_START_METHOD:-}"   # spawn = fresh interpreter per env worker (EGL/fork fix)
+LOG_TAG="${LOG_TAG:-}"                           # optional suffix on the per-job log (parallel recipes)
+# Planning budgets. run_mpc.sh reads every one of these with ${X:-default}, so exporting them
+# (empty included) only pins what the container sees; before this they were pass-through only,
+# which is exactly the sort of thing that can differ silently between two sibling jobs. The
+# CEM ones end up in the run dir name (ns/opt), so the values stay verifiable afterwards.
+FULL_N_EVALS="${FULL_N_EVALS:-}"       # full run: episodes to evaluate   (run_mpc.sh: 50)
+FULL_MAX_ITER="${FULL_MAX_ITER:-}"     # full run: MPC iteration cap      (20)
+GD_OPT="${GD_OPT:-}"                   # GD sub-planner opt steps         (100)
+CEM_SAMPLES="${CEM_SAMPLES:-}"         # closed-loop CEM candidates       (200)
+CEM_OPT="${CEM_OPT:-}"                 # closed-loop CEM opt steps        (10)
+OL_N_EVALS="${OL_N_EVALS:-}"           # open-loop episodes               (= FULL_N_EVALS)
+OL_GD_OPT="${OL_GD_OPT:-}"             # open-loop GD opt steps           (100)
+OL_CEM_SAMPLES="${OL_CEM_SAMPLES:-}"   # open-loop CEM candidates         (300)
+OL_CEM_OPT="${OL_CEM_OPT:-}"           # open-loop CEM opt steps          (30)
 
 # Unchunked planning starts one env process per episode; say so rather than silently
 # chunking (or silently oversubscribing the allocation).
@@ -220,7 +242,9 @@ esac
 # the export block and the ordering check further down, so the two cannot drift apart.
 PREAMBLE_VARS=(REPO_IN_CONTAINER CONTAINER_CONDA CONDA_ENV FULL OL SEEDS PREFLIGHT JOBS
                CHUNK OL_CHUNK CEM_CHUNK CKBPT_PATH CKPT_ROOT ENV_FILE OL_SUFFIX OVERLAY_RO PROBE
-               ARM_NAMES TS_ENV_START_METHOD)
+               ARM_NAMES TS_ENV_START_METHOD LOG_TAG
+               FULL_N_EVALS FULL_MAX_ITER GD_OPT CEM_SAMPLES CEM_OPT
+               OL_N_EVALS OL_GD_OPT OL_CEM_SAMPLES OL_CEM_OPT)
 OL_SUFFIX=""
 if [ "$OL" = "1" ]; then OL_SUFFIX=".ol"; fi
 
@@ -244,7 +268,11 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 log_dir="$CKPT_ROOT/logs"
 mkdir -p "$log_dir"
 echo "[container] python=$(command -v python)  DATA_ROOT=$DATA_ROOT  log_dir=$log_dir"
-echo "[container] knobs  : TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>}  ARM_NAMES=${ARM_NAMES:-<auto-discovered>}"
+echo "[container] knobs  : TS_ENV_START_METHOD=${TS_ENV_START_METHOD:-<unset>}  ARM_NAMES=${ARM_NAMES:-<auto-discovered>}  LOG_TAG=${LOG_TAG:-<none>}"
+# Budgets as run_mpc.sh will read them, defaults included: an OL/CL comparison cannot then
+# silently run different CEM budgets (the run dir name carries ns/opt as well).
+echo "[container] budgets: FULL_N_EVALS=${FULL_N_EVALS:-50(def)} FULL_MAX_ITER=${FULL_MAX_ITER:-20(def)} GD_OPT=${GD_OPT:-100(def)} CEM_SAMPLES=${CEM_SAMPLES:-200(def)} CEM_OPT=${CEM_OPT:-10(def)}"
+echo "[container] budgets: OL_N_EVALS=${OL_N_EVALS:-<FULL>} OL_GD_OPT=${OL_GD_OPT:-100(def)} OL_CEM_SAMPLES=${OL_CEM_SAMPLES:-300(def)} OL_CEM_OPT=${OL_CEM_OPT:-30(def)}"
 
 if [ "$PROBE" = "1" ]; then
     echo "---- GL probe: does a forked env worker initialise EGL here? ----"
@@ -270,7 +298,7 @@ fail=""
 for job in $JOBS; do
     env_sel="${job%%:*}"; rest="${job#*:}"
     variant="${rest%%:*}"; planner="${rest#*:}"
-    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
+    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}${LOG_TAG:+.${LOG_TAG}}.log"
     echo
     # This banner is tee'd into $log on purpose: the log is append-only across jobs, so the
     # summary below needs a marker to tell THIS job's output from an earlier run's (it used
@@ -290,7 +318,7 @@ echo "==================== summary ===================="
 for job in $JOBS; do
     env_sel="${job%%:*}"; rest="${job#*:}"
     variant="${rest%%:*}"; planner="${rest#*:}"
-    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}.log"
+    log="$log_dir/mpc_${env_sel}_${variant}_${planner}${OL_SUFFIX}${LOG_TAG:+.${LOG_TAG}}.log"
     # $log is append-only across jobs, so every read is scoped to THIS job's section: the
     # banner above the run_mpc.sh call marks where it starts. Reading the whole file (the old
     # `tail -1` on success_rate, or the first four [estimate] lines anywhere in it) reported an

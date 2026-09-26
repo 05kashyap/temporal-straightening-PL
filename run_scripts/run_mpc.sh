@@ -322,8 +322,8 @@ esac
 FULL_N_EVALS="${FULL_N_EVALS:-50}"
 FULL_MAX_ITER="${FULL_MAX_ITER:-20}"
 GD_OPT="${GD_OPT:-100}"              # paper Table 4
-CEM_SAMPLES=200         # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
-CEM_OPT=10              # plan_mpc_cem.yaml default
+CEM_SAMPLES="${CEM_SAMPLES:-200}"   # plan_mpc_cem.yaml default (DINO-WM MPC CEM budget)
+CEM_OPT="${CEM_OPT:-10}"            # plan_mpc_cem.yaml default
 CEM_CHUNK="${CEM_CHUNK:-50}"   # CEM sample_chunk_size; "null" rolls every candidate at once
 
 S_N_EVALS=1
